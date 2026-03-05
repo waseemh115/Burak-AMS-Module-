@@ -1,801 +1,588 @@
-import { useState, useEffect, useRef } from "react";
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Burak Multiomics — AMS Engine</title>
+  <meta name="description" content="Antimicrobial Screening Layer — Burak Multiomics Platform POC" />
 
-// ─── THRESHOLDS ──────────────────────────────────────────────
-const T = {
-  WBC:   { lo:4.5,  hi:11.0, fireAbove:15.0, unit:"×10³/μL", label:"WBC",         group:"B", max:25,  desc:"White Blood Cell Count" },
-  NEUT:  { lo:50,   hi:70,   fireAbove:80,   unit:"%",        label:"Neutrophils", group:"B", max:100, desc:"Neutrophil Percentage" },
-  CRP:   { lo:0,    hi:10,   fireAbove:50,   unit:"mg/L",     label:"CRP",         group:"B", max:120, desc:"C-Reactive Protein" },
-  PLT:   { lo:150,  hi:400,  fireBelow:100,  unit:"×10³/μL", label:"Platelets",   group:"V", max:500, desc:"Platelet Count" },
-  LYMPH: { lo:20,   hi:40,   fireBelow:15,   unit:"%",        label:"Lymphocytes", group:"V", max:60,  desc:"Lymphocyte %" },
-  LDH:   { lo:140,  hi:280,  fireAbove:400,  unit:"U/L",      label:"LDH",         group:"V", max:700, desc:"Lactate Dehydrogenase" },
-};
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
 
-const PRESETS = {
-  healthy:     { label:"Healthy",       emoji:"💚", WBC:7.2,  NEUT:58, CRP:4,  PLT:250, LYMPH:30, LDH:200, desc:"All markers within normal range" },
-  bacterial:   { label:"Bacterial",     emoji:"🔴", WBC:18.5, NEUT:85, CRP:78, PLT:220, LYMPH:22, LDH:260, desc:"Classic bacterial spike — 2-of-3 fires" },
-  viral:       { label:"Viral Load",    emoji:"🟣", WBC:5.1,  NEUT:42, CRP:22, PLT:88,  LYMPH:10, LDH:520, desc:"PLT drops + Lymphocytes suppressed + LDH spikes" },
-  mixed:       { label:"Mixed/Severe",  emoji:"🟠", WBC:14.2, NEUT:76, CRP:55, PLT:105, LYMPH:12, LDH:480, desc:"Both bacterial AND viral patterns fire" },
-  subclinical: { label:"Sub-Clinical",  emoji:"🟡", WBC:8.9,  NEUT:65, CRP:18, PLT:160, LYMPH:18, LDH:310, desc:"Elevated but below threshold — velocity signal" },
-};
+  <!-- React 18 + Babel (no build step needed) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-function runAMS(v) {
-  const bWBC  = v.WBC  > T.WBC.fireAbove;
-  const bNEUT = v.NEUT > T.NEUT.fireAbove;
-  const bCRP  = v.CRP  > T.CRP.fireAbove;
-  const bScore = [bWBC, bNEUT, bCRP].filter(Boolean).length;
-  const bacterialFired = bScore >= 2;
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body { background: #F0F4FF; font-family: 'Plus Jakarta Sans', sans-serif; }
+    input[type=range] { height: 4px; cursor: pointer; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; background: #F1F5F9; }
+    ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+    @keyframes fadein { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    .fi { animation: fadein 0.4s ease forwards; }
+    .pulse { animation: pulse 2s infinite; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
 
-  const vPLT   = v.PLT   < T.PLT.fireBelow;
-  const vLYMPH = v.LYMPH < T.LYMPH.fireBelow;
-  const vLDH   = v.LDH   > T.LDH.fireAbove;
-  const vScore = [vPLT, vLYMPH, vLDH].filter(Boolean).length;
-  const viralFired = vScore === 3;
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
 
-  const quarantine = bacterialFired || viralFired;
-  const type = bacterialFired && viralFired ? "MIXED" : bacterialFired ? "BACTERIAL" : viralFired ? "VIRAL" : null;
-
-  const drift = [];
-  if (!quarantine) {
-    if (v.WBC   > 11)  drift.push("WBC elevated");
-    if (v.CRP   > 10)  drift.push("CRP elevated");
-    if (v.PLT   < 150) drift.push("PLT suppressed");
-    if (v.LYMPH < 20)  drift.push("Lymphocytes low");
-    if (v.LDH   > 280) drift.push("LDH elevated");
-  }
-  return { bWBC, bNEUT, bCRP, bScore, bacterialFired, vPLT, vLYMPH, vLDH, vScore, viralFired, quarantine, type, drift };
-}
-
-// ─── ANIMATED NUMBER ─────────────────────────────────────────
-function AnimNum({ value, decimals }) {
-  const dec = decimals === undefined ? 1 : decimals;
-  const [display, setDisplay] = useState(value);
-  const ref = useRef(value);
-  useEffect(() => {
-    const start = ref.current;
-    const end = value;
-    const dur = 400;
-    const startTime = performance.now();
-    const tick = (now) => {
-      const p = Math.min((now - startTime) / dur, 1);
-      const ease = 1 - Math.pow(1 - p, 3);
-      setDisplay(start + (end - start) * ease);
-      if (p < 1) requestAnimationFrame(tick);
-      else ref.current = end;
+    // ─── THRESHOLDS ──────────────────────────────────────────────
+    const T = {
+      WBC:   { lo:4.5,  hi:11.0, fireAbove:15.0, unit:"×10³/μL", label:"WBC",         group:"B", max:25,  desc:"White Blood Cell Count" },
+      NEUT:  { lo:50,   hi:70,   fireAbove:80,   unit:"%",        label:"Neutrophils", group:"B", max:100, desc:"Neutrophil Percentage" },
+      CRP:   { lo:0,    hi:10,   fireAbove:50,   unit:"mg/L",     label:"CRP",         group:"B", max:120, desc:"C-Reactive Protein" },
+      PLT:   { lo:150,  hi:400,  fireBelow:100,  unit:"×10³/μL", label:"Platelets",   group:"V", max:500, desc:"Platelet Count" },
+      LYMPH: { lo:20,   hi:40,   fireBelow:15,   unit:"%",        label:"Lymphocytes", group:"V", max:60,  desc:"Lymphocyte %" },
+      LDH:   { lo:140,  hi:280,  fireAbove:400,  unit:"U/L",      label:"LDH",         group:"V", max:700, desc:"Lactate Dehydrogenase" },
     };
-    requestAnimationFrame(tick);
-  }, [value]);
-  return <span>{display.toFixed(dec)}</span>;
-}
 
-// ─── SCORE RING ───────────────────────────────────────────────
-function ScoreRing({ score, max, fired, color, label }) {
-  const r = 32;
-  const circ = 2 * Math.PI * r;
-  const pct = score / max;
-  return (
-    <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:6 }}>
-      <div style={{ position:"relative", width:84, height:84 }}>
-        <svg width={84} height={84} style={{ transform:"rotate(-90deg)" }}>
-          <circle cx={42} cy={42} r={r} fill="none" stroke="#E2E8F0" strokeWidth={7} />
-          <circle cx={42} cy={42} r={r} fill="none" stroke={fired ? color : "#CBD5E1"} strokeWidth={7}
-            strokeDasharray={`${circ * pct} ${circ * (1 - pct)}`} strokeLinecap="round"
-            style={{ transition:"stroke-dasharray 0.5s cubic-bezier(.4,0,.2,1), stroke 0.3s" }}
-          />
-        </svg>
-        <div style={{ position:"absolute", inset:0, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center" }}>
-          <div style={{ fontFamily:"'Plus Jakarta Sans',sans-serif", fontSize:22, fontWeight:800, color:fired ? color : "#94A3B8", lineHeight:1, transition:"color 0.3s" }}>
-            {score}/{max}
+    const PRESETS = {
+      healthy:     { label:"Healthy",       emoji:"💚", WBC:7.2,  NEUT:58, CRP:4,  PLT:250, LYMPH:30, LDH:200, desc:"All markers within normal range" },
+      bacterial:   { label:"Bacterial",     emoji:"🔴", WBC:18.5, NEUT:85, CRP:78, PLT:220, LYMPH:22, LDH:260, desc:"Classic bacterial spike — 2-of-3 fires" },
+      viral:       { label:"Viral Load",    emoji:"🟣", WBC:5.1,  NEUT:42, CRP:22, PLT:88,  LYMPH:10, LDH:520, desc:"PLT drops + Lymphocytes suppressed + LDH spikes" },
+      mixed:       { label:"Mixed/Severe",  emoji:"🟠", WBC:14.2, NEUT:76, CRP:55, PLT:105, LYMPH:12, LDH:480, desc:"Both bacterial AND viral patterns fire" },
+      subclinical: { label:"Sub-Clinical",  emoji:"🟡", WBC:8.9,  NEUT:65, CRP:18, PLT:160, LYMPH:18, LDH:310, desc:"Elevated but below threshold — velocity signal" },
+    };
+
+    function runAMS(v) {
+      const bWBC  = v.WBC  > T.WBC.fireAbove;
+      const bNEUT = v.NEUT > T.NEUT.fireAbove;
+      const bCRP  = v.CRP  > T.CRP.fireAbove;
+      const bScore = [bWBC, bNEUT, bCRP].filter(Boolean).length;
+      const bacterialFired = bScore >= 2;
+      const vPLT   = v.PLT   < T.PLT.fireBelow;
+      const vLYMPH = v.LYMPH < T.LYMPH.fireBelow;
+      const vLDH   = v.LDH   > T.LDH.fireAbove;
+      const vScore = [vPLT, vLYMPH, vLDH].filter(Boolean).length;
+      const viralFired = vScore === 3;
+      const quarantine = bacterialFired || viralFired;
+      const type = bacterialFired && viralFired ? "MIXED" : bacterialFired ? "BACTERIAL" : viralFired ? "VIRAL" : null;
+      const drift = [];
+      if (!quarantine) {
+        if (v.WBC   > 11)  drift.push("WBC elevated");
+        if (v.CRP   > 10)  drift.push("CRP elevated");
+        if (v.PLT   < 150) drift.push("PLT suppressed");
+        if (v.LYMPH < 20)  drift.push("Lymphocytes low");
+        if (v.LDH   > 280) drift.push("LDH elevated");
+      }
+      return { bWBC, bNEUT, bCRP, bScore, bacterialFired, vPLT, vLYMPH, vLDH, vScore, viralFired, quarantine, type, drift };
+    }
+
+    // ─── ANIMATED NUMBER ─────────────────────────────────────────
+    function AnimNum({ value, decimals }) {
+      const dec = decimals === undefined ? 1 : decimals;
+      const [display, setDisplay] = useState(value);
+      const ref = useRef(value);
+      useEffect(() => {
+        const start = ref.current;
+        const end = value;
+        const dur = 400;
+        const startTime = performance.now();
+        const tick = (now) => {
+          const p = Math.min((now - startTime) / dur, 1);
+          const ease = 1 - Math.pow(1 - p, 3);
+          setDisplay(start + (end - start) * ease);
+          if (p < 1) requestAnimationFrame(tick);
+          else ref.current = end;
+        };
+        requestAnimationFrame(tick);
+      }, [value]);
+      return <span>{display.toFixed(dec)}</span>;
+    }
+
+    // ─── SCORE RING ───────────────────────────────────────────────
+    function ScoreRing({ score, max, fired, color, label }) {
+      const r = 32;
+      const circ = 2 * Math.PI * r;
+      const pct = score / max;
+      return (
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:6 }}>
+          <div style={{ position:"relative", width:84, height:84 }}>
+            <svg width={84} height={84} style={{ transform:"rotate(-90deg)" }}>
+              <circle cx={42} cy={42} r={r} fill="none" stroke="#E2E8F0" strokeWidth={7} />
+              <circle cx={42} cy={42} r={r} fill="none" stroke={fired ? color : "#CBD5E1"} strokeWidth={7}
+                strokeDasharray={`${circ * pct} ${circ * (1 - pct)}`} strokeLinecap="round"
+                style={{ transition:"stroke-dasharray 0.5s cubic-bezier(.4,0,.2,1), stroke 0.3s" }}
+              />
+            </svg>
+            <div style={{ position:"absolute", inset:0, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center" }}>
+              <div style={{ fontFamily:"'Plus Jakarta Sans',sans-serif", fontSize:22, fontWeight:800, color:fired ? color : "#94A3B8", lineHeight:1, transition:"color 0.3s" }}>
+                {score}/{max}
+              </div>
+            </div>
           </div>
+          <div style={{ fontSize:11, fontWeight:700, color:fired ? color : "#94A3B8", textAlign:"center", letterSpacing:0.5, textTransform:"uppercase" }}>{label}</div>
+          {fired && <div style={{ fontSize:10, background:color, color:"#fff", borderRadius:99, padding:"2px 10px", fontWeight:800 }}>FIRED</div>}
         </div>
-      </div>
-      <div style={{ fontSize:11, fontWeight:700, color:fired ? color : "#94A3B8", textAlign:"center", letterSpacing:0.5, textTransform:"uppercase" }}>{label}</div>
-      {fired && (
-        <div style={{ fontSize:10, background:color, color:"#fff", borderRadius:99, padding:"2px 10px", fontWeight:800 }}>FIRED</div>
-      )}
-    </div>
-  );
-}
+      );
+    }
 
-// ─── MARKER CARD ─────────────────────────────────────────────
-function MarkerCard({ id, value, onChange, fired, group }) {
-  const t = T[id];
-  const isHigh = t.fireAbove !== undefined;
-  const threshold = isHigh ? t.fireAbove : t.fireBelow;
-  const pct = (v) => Math.min(100, Math.max(0, (v / t.max) * 100));
-  const gc = group === "B" ? "#EF4444" : "#8B5CF6";
-  const gcBg = group === "B"
-    ? "linear-gradient(135deg,#FFF5F5,#FEE2E2)"
-    : "linear-gradient(135deg,#F5F3FF,#EDE9FE)";
-
-  return (
-    <div style={{
-      background: fired ? gcBg : "#fff",
-      border: `2px solid ${fired ? gc : "#E2E8F0"}`,
-      borderRadius: 18,
-      padding: "18px 20px",
-      boxShadow: fired ? `0 6px 28px ${gc}28` : "0 2px 10px rgba(0,0,0,0.05)",
-      transition: "all 0.35s cubic-bezier(.4,0,.2,1)",
-    }}>
-      {/* Header row */}
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
-        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-          <div style={{
-            width:44, height:44, borderRadius:14,
-            background: fired ? gc : "#F1F5F9",
-            display:"flex", alignItems:"center", justifyContent:"center",
-            fontSize:11, fontWeight:900, color: fired ? "#fff" : "#64748B",
-            fontFamily:"'Plus Jakarta Sans',sans-serif",
-            boxShadow: fired ? `0 4px 14px ${gc}50` : "none",
-            transition:"all 0.3s",
-            letterSpacing: 0.3,
-          }}>
-            {id.slice(0, 4)}
-          </div>
-          <div>
-            <div style={{ fontWeight:800, fontSize:15, color: fired ? gc : "#1E293B", lineHeight:1.2 }}>{t.label}</div>
-            <div style={{ fontSize:11, color:"#94A3B8", marginTop:2 }}>{t.desc}</div>
-          </div>
-        </div>
-        <div style={{ textAlign:"right" }}>
-          <div style={{ fontSize:28, fontWeight:900, color: fired ? gc : "#0F172A", fontFamily:"'Plus Jakarta Sans',sans-serif", lineHeight:1 }}>
-            <AnimNum value={value} />
-          </div>
-          <div style={{ fontSize:11, color:"#94A3B8", marginTop:2, fontWeight:600 }}>{t.unit}</div>
-        </div>
-      </div>
-
-      {/* Progress track */}
-      <div style={{ position:"relative", height:10, background:"#F1F5F9", borderRadius:99, marginBottom:10, overflow:"hidden" }}>
-        <div style={{ position:"absolute", top:0, bottom:0, left:`${pct(t.lo)}%`, width:`${pct(t.hi) - pct(t.lo)}%`, background:"#DCFCE7", borderRadius:99 }} />
-        <div style={{
-          position:"absolute", top:0, bottom:0, left:0, width:`${pct(value)}%`,
-          background: fired
-            ? `linear-gradient(90deg, ${gc}80, ${gc})`
-            : "linear-gradient(90deg,#BFDBFE,#6366F1)",
-          borderRadius:99, transition:"width 0.4s cubic-bezier(.4,0,.2,1)",
-        }} />
-        <div style={{ position:"absolute", top:"50%", left:`${pct(threshold)}%`, transform:"translate(-50%,-50%)", width:3, height:16, background: fired ? gc : "#94A3B8", borderRadius:99, zIndex:2 }} />
-      </div>
-
-      <input type="range" min={0} max={t.max} step={t.max / 300} value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
-        style={{ width:"100%", accentColor: fired ? gc : "#6366F1", cursor:"pointer", marginBottom:8 }}
-      />
-
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-        <span style={{ fontSize:11, color:"#94A3B8", fontWeight:500 }}>Normal: {t.lo}–{t.hi} {t.unit}</span>
-        <span style={{
-          padding:"3px 10px", borderRadius:99, fontWeight:700, fontSize:11,
-          background: fired ? gc : "#F1F5F9",
-          color: fired ? "#fff" : "#64748B",
-          transition:"all 0.3s",
-        }}>
-          {fired ? "⚡ BREACH" : (isHigh ? `fires > ${threshold}` : `fires < ${threshold}`)}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-// ─── CODE BLOCK ───────────────────────────────────────────────
-function CodeBlock({ lines }) {
-  return (
-    <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:12, lineHeight:2, background:"#0F172A", borderRadius:14, padding:"20px 22px", overflowX:"auto", border:"1px solid #1E293B" }}>
-      {lines.map((ln, i) => {
-        if (!ln) return <div key={i} style={{ height:6 }} />;
-        const trim = ln.trimStart();
-        const indent = ln.match(/^(\s+)/)?.[1]?.length || 0;
-        let col = "#94A3B8";
-        if (trim.startsWith("//")) col = "#475569";
-        else if (/^(const|function|return|if|else)/.test(trim)) col = "#7DD3FC";
-        else if (trim.includes("QUARANTINE")) col = "#F87171";
-        else if (trim.includes("PASS")) col = "#4ADE80";
-        else if (trim.includes("=") && !trim.includes("==")) col = "#FCD34D";
-        return (
-          <div key={i} style={{ paddingLeft: indent * 10, color:col, whiteSpace:"pre" }}>{trim}</div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ─── MAIN COMPONENT ──────────────────────────────────────────
-export default function AMS() {
-  const [vals, setVals] = useState({ ...PRESETS.healthy });
-  const [preset, setPreset] = useState("healthy");
-  const [tab, setTab] = useState("visual");
-
-  const r = runAMS(vals);
-
-  const statusConfig = r.quarantine
-    ? r.type === "MIXED"
-      ? { label:"QUARANTINE — MIXED PATHOGEN",      color:"#F97316", bg:"linear-gradient(135deg,#FFF7ED,#FFEDD5)", border:"#FB923C", icon:"⛔" }
-      : r.type === "BACTERIAL"
-      ? { label:"QUARANTINE — BACTERIAL PATTERN",    color:"#EF4444", bg:"linear-gradient(135deg,#FFF5F5,#FEE2E2)", border:"#F87171", icon:"⛔" }
-      : { label:"QUARANTINE — VIRAL PATTERN",        color:"#8B5CF6", bg:"linear-gradient(135deg,#F5F3FF,#EDE9FE)", border:"#A78BFA", icon:"⛔" }
-    : r.drift.length > 0
-    ? { label:"PASS → SUB-CLINICAL DRIFT FLAGGED",   color:"#D97706", bg:"linear-gradient(135deg,#FFFBEB,#FEF3C7)", border:"#FCD34D", icon:"⚡" }
-    : { label:"PASS → CLINICAL LAYER",               color:"#059669", bg:"linear-gradient(135deg,#F0FDF4,#DCFCE7)", border:"#6EE7B7", icon:"✅" };
-
-  const setVal = (id) => (v) => {
-    setVals((p) => ({ ...p, [id]: v }));
-    setPreset(null);
-  };
-
-  const load = (key) => {
-    setVals({ ...PRESETS[key] });
-    setPreset(key);
-  };
-
-  const presetColors = { healthy:"#059669", bacterial:"#EF4444", viral:"#8B5CF6", mixed:"#F97316", subclinical:"#D97706" };
-
-  return (
-    <div style={{ minHeight:"100vh", background:"#F0F4FF", fontFamily:"'Plus Jakarta Sans',sans-serif", color:"#1E293B" }}>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600;700&display=swap');
-        * { box-sizing:border-box; margin:0; padding:0; }
-        input[type=range] { height:4px; }
-        ::-webkit-scrollbar { width:6px; height:6px; background:#F1F5F9; }
-        ::-webkit-scrollbar-thumb { background:#CBD5E1; border-radius:3px; }
-        @keyframes fadein { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
-        @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
-        .fi { animation: fadein 0.4s ease forwards; }
-      `}</style>
-
-      {/* Mesh background blobs */}
-      <div style={{ position:"fixed", inset:0, zIndex:0, pointerEvents:"none", overflow:"hidden" }}>
-        <div style={{ position:"absolute", top:-160, left:-160, width:580, height:580, borderRadius:"50%", background:"radial-gradient(circle,#E0E7FF 0%,transparent 70%)", opacity:0.9 }} />
-        <div style={{ position:"absolute", top:80, right:-80, width:480, height:480, borderRadius:"50%", background:"radial-gradient(circle,#DCFCE7 0%,transparent 70%)", opacity:0.7 }} />
-        <div style={{ position:"absolute", bottom:-60, left:"35%", width:560, height:360, borderRadius:"50%", background:"radial-gradient(circle,#EDE9FE 0%,transparent 70%)", opacity:0.6 }} />
-      </div>
-
-      <div style={{ position:"relative", zIndex:1 }}>
-
-        {/* ── HEADER ── */}
-        <div style={{ background:"rgba(255,255,255,0.88)", backdropFilter:"blur(20px)", borderBottom:"1px solid #E2E8F0", padding:"0 36px", boxShadow:"0 2px 24px rgba(0,0,0,0.06)" }}>
-          <div style={{ maxWidth:1380, margin:"0 auto", display:"flex", alignItems:"center", justifyContent:"space-between", height:70 }}>
-
-            <div style={{ display:"flex", alignItems:"center", gap:18 }}>
-              <div style={{ width:48, height:48, borderRadius:16, background:"linear-gradient(135deg,#6366F1,#8B5CF6)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, boxShadow:"0 6px 20px #6366F155" }}>
-                🧬
+    // ─── MARKER CARD ─────────────────────────────────────────────
+    function MarkerCard({ id, value, onChange, fired, group }) {
+      const t = T[id];
+      const isHigh = t.fireAbove !== undefined;
+      const threshold = isHigh ? t.fireAbove : t.fireBelow;
+      const pct = (v) => Math.min(100, Math.max(0, (v / t.max) * 100));
+      const gc = group === "B" ? "#EF4444" : "#8B5CF6";
+      const gcBg = group === "B"
+        ? "linear-gradient(135deg,#FFF5F5,#FEE2E2)"
+        : "linear-gradient(135deg,#F5F3FF,#EDE9FE)";
+      return (
+        <div style={{ background: fired ? gcBg : "#fff", border: `2px solid ${fired ? gc : "#E2E8F0"}`, borderRadius:18, padding:"18px 20px", boxShadow: fired ? `0 6px 28px ${gc}28` : "0 2px 10px rgba(0,0,0,0.05)", transition:"all 0.35s cubic-bezier(.4,0,.2,1)" }}>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+              <div style={{ width:44, height:44, borderRadius:14, background: fired ? gc : "#F1F5F9", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:900, color: fired ? "#fff" : "#64748B", fontFamily:"'Plus Jakarta Sans',sans-serif", boxShadow: fired ? `0 4px 14px ${gc}50` : "none", transition:"all 0.3s", letterSpacing:0.3 }}>
+                {id.slice(0, 4)}
               </div>
               <div>
-                <div style={{ fontWeight:900, fontSize:18, color:"#0F172A", letterSpacing:-0.4 }}>Burak Multiomics</div>
-                <div style={{ fontSize:12, color:"#94A3B8", fontWeight:500 }}>AMS Engine · Antimicrobial Screening Layer</div>
+                <div style={{ fontWeight:800, fontSize:15, color: fired ? gc : "#1E293B", lineHeight:1.2 }}>{t.label}</div>
+                <div style={{ fontSize:11, color:"#94A3B8", marginTop:2 }}>{t.desc}</div>
               </div>
             </div>
-
-            {/* Pipeline breadcrumb */}
-            <div style={{ display:"flex", alignItems:"center", background:"#F8FAFC", borderRadius:14, padding:"8px 12px", border:"1px solid #E2E8F0", gap:0 }}>
-              {[["INGESTION","#94A3B8",false], ["AMS","#6366F1",true], ["CLINICAL","#CBD5E1",false], ["POPULATION","#CBD5E1",false]].map(([s, c, a], i) => (
-                <div key={i} style={{ display:"flex", alignItems:"center" }}>
-                  {i > 0 && <div style={{ width:20, height:2, background: i === 1 ? "#6366F1" : "#E2E8F0", borderRadius:99 }} />}
-                  <div style={{
-                    padding:"6px 14px", borderRadius:10, fontSize:11, fontWeight:800,
-                    background: a ? "linear-gradient(135deg,#6366F1,#8B5CF6)" : "transparent",
-                    color: a ? "#fff" : c,
-                    boxShadow: a ? "0 3px 12px #6366F145" : "none",
-                    letterSpacing: 0.5,
-                  }}>{s}</div>
-                </div>
-              ))}
+            <div style={{ textAlign:"right" }}>
+              <div style={{ fontSize:28, fontWeight:900, color: fired ? gc : "#0F172A", fontFamily:"'Plus Jakarta Sans',sans-serif", lineHeight:1 }}>
+                <AnimNum value={value} />
+              </div>
+              <div style={{ fontSize:11, color:"#94A3B8", marginTop:2, fontWeight:600 }}>{t.unit}</div>
             </div>
+          </div>
+          <div style={{ position:"relative", height:10, background:"#F1F5F9", borderRadius:99, marginBottom:10, overflow:"hidden" }}>
+            <div style={{ position:"absolute", top:0, bottom:0, left:`${pct(t.lo)}%`, width:`${pct(t.hi) - pct(t.lo)}%`, background:"#DCFCE7", borderRadius:99 }} />
+            <div style={{ position:"absolute", top:0, bottom:0, left:0, width:`${pct(value)}%`, background: fired ? `linear-gradient(90deg,${gc}80,${gc})` : "linear-gradient(90deg,#BFDBFE,#6366F1)", borderRadius:99, transition:"width 0.4s cubic-bezier(.4,0,.2,1)" }} />
+            <div style={{ position:"absolute", top:"50%", left:`${pct(threshold)}%`, transform:"translate(-50%,-50%)", width:3, height:16, background: fired ? gc : "#94A3B8", borderRadius:99, zIndex:2 }} />
+          </div>
+          <input type="range" min={0} max={t.max} step={t.max / 300} value={value}
+            onChange={(e) => onChange(parseFloat(e.target.value))}
+            style={{ width:"100%", accentColor: fired ? gc : "#6366F1", marginBottom:8 }} />
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <span style={{ fontSize:11, color:"#94A3B8", fontWeight:500 }}>Normal: {t.lo}–{t.hi} {t.unit}</span>
+            <span style={{ padding:"3px 10px", borderRadius:99, fontWeight:700, fontSize:11, background: fired ? gc : "#F1F5F9", color: fired ? "#fff" : "#64748B", transition:"all 0.3s" }}>
+              {fired ? "⚡ BREACH" : (isHigh ? `fires > ${threshold}` : `fires < ${threshold}`)}
+            </span>
           </div>
         </div>
+      );
+    }
 
-        <div style={{ maxWidth:1380, margin:"0 auto", padding:"28px 36px" }}>
+    // ─── CODE BLOCK ───────────────────────────────────────────────
+    function CodeBlock({ lines }) {
+      return (
+        <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:12, lineHeight:2, background:"#0F172A", borderRadius:14, padding:"20px 22px", overflowX:"auto", border:"1px solid #1E293B" }}>
+          {lines.map((ln, i) => {
+            if (!ln) return <div key={i} style={{ height:6 }} />;
+            const trim = ln.trimStart();
+            const indent = (ln.match(/^(\s+)/)?.[1]?.length) || 0;
+            let col = "#94A3B8";
+            if (trim.startsWith("//")) col = "#475569";
+            else if (/^(const|function|return|if|else)/.test(trim)) col = "#7DD3FC";
+            else if (trim.includes("QUARANTINE")) col = "#F87171";
+            else if (trim.includes("PASS")) col = "#4ADE80";
+            else if (trim.includes("=") && !trim.includes("==")) col = "#FCD34D";
+            return <div key={i} style={{ paddingLeft: indent * 10, color:col, whiteSpace:"pre" }}>{trim}</div>;
+          })}
+        </div>
+      );
+    }
 
-          {/* ── STATUS BANNER ── */}
-          <div key={statusConfig.label} className="fi" style={{
-            background: statusConfig.bg,
-            border: `2px solid ${statusConfig.border}`,
-            borderRadius:22, padding:"22px 32px", marginBottom:22,
-            boxShadow:`0 10px 48px ${statusConfig.color}22`,
-            display:"flex", alignItems:"center", justifyContent:"space-between",
-          }}>
-            <div style={{ display:"flex", alignItems:"center", gap:18 }}>
-              <div style={{
-                width:64, height:64, borderRadius:20,
-                background:`linear-gradient(135deg,${statusConfig.color}22,${statusConfig.color}44)`,
-                display:"flex", alignItems:"center", justifyContent:"center",
-                fontSize:30, border:`2px solid ${statusConfig.color}50`,
-                boxShadow:`0 6px 24px ${statusConfig.color}30`,
-              }}>{statusConfig.icon}</div>
-              <div>
-                <div style={{ fontWeight:900, fontSize:20, color:statusConfig.color, letterSpacing:-0.4 }}>{statusConfig.label}</div>
-                {r.drift.length > 0 && !r.quarantine && (
-                  <div style={{ fontSize:13, color:"#D97706", marginTop:5, fontWeight:600 }}>Drift signals: {r.drift.join(" · ")}</div>
-                )}
-                {r.quarantine && (
-                  <div style={{ fontSize:13, color:statusConfig.color, marginTop:5, opacity:0.8 }}>Report isolated — will not proceed to Clinical Layer.</div>
-                )}
-              </div>
-            </div>
-            <div style={{ display:"flex", gap:28, alignItems:"center" }}>
-              <ScoreRing score={r.bScore} max={3} fired={r.bacterialFired} color="#EF4444" label="Bacterial" />
-              <ScoreRing score={r.vScore} max={3} fired={r.viralFired}    color="#8B5CF6" label="Viral" />
-            </div>
+    // ─── MAIN APP ────────────────────────────────────────────────
+    function AMS() {
+      const [vals, setVals] = useState({ ...PRESETS.healthy });
+      const [preset, setPreset] = useState("healthy");
+      const [tab, setTab] = useState("visual");
+      const r = runAMS(vals);
+
+      const statusConfig = r.quarantine
+        ? r.type === "MIXED"
+          ? { label:"QUARANTINE — MIXED PATHOGEN",     color:"#F97316", bg:"linear-gradient(135deg,#FFF7ED,#FFEDD5)", border:"#FB923C", icon:"⛔" }
+          : r.type === "BACTERIAL"
+          ? { label:"QUARANTINE — BACTERIAL PATTERN",  color:"#EF4444", bg:"linear-gradient(135deg,#FFF5F5,#FEE2E2)", border:"#F87171", icon:"⛔" }
+          : { label:"QUARANTINE — VIRAL PATTERN",      color:"#8B5CF6", bg:"linear-gradient(135deg,#F5F3FF,#EDE9FE)", border:"#A78BFA", icon:"⛔" }
+        : r.drift.length > 0
+        ? { label:"PASS → SUB-CLINICAL DRIFT FLAGGED", color:"#D97706", bg:"linear-gradient(135deg,#FFFBEB,#FEF3C7)", border:"#FCD34D", icon:"⚡" }
+        : { label:"PASS → CLINICAL LAYER",             color:"#059669", bg:"linear-gradient(135deg,#F0FDF4,#DCFCE7)", border:"#6EE7B7", icon:"✅" };
+
+      const setVal = (id) => (v) => { setVals((p) => ({ ...p, [id]: v })); setPreset(null); };
+      const load   = (key) => { setVals({ ...PRESETS[key] }); setPreset(key); };
+      const presetColors = { healthy:"#059669", bacterial:"#EF4444", viral:"#8B5CF6", mixed:"#F97316", subclinical:"#D97706" };
+
+      return (
+        <div style={{ minHeight:"100vh", background:"#F0F4FF", color:"#1E293B" }}>
+
+          {/* Mesh blobs */}
+          <div style={{ position:"fixed", inset:0, zIndex:0, pointerEvents:"none", overflow:"hidden" }}>
+            <div style={{ position:"absolute", top:-160, left:-160, width:580, height:580, borderRadius:"50%", background:"radial-gradient(circle,#E0E7FF 0%,transparent 70%)", opacity:0.9 }} />
+            <div style={{ position:"absolute", top:80, right:-80, width:480, height:480, borderRadius:"50%", background:"radial-gradient(circle,#DCFCE7 0%,transparent 70%)", opacity:0.7 }} />
+            <div style={{ position:"absolute", bottom:-60, left:"35%", width:560, height:360, borderRadius:"50%", background:"radial-gradient(circle,#EDE9FE 0%,transparent 70%)", opacity:0.6 }} />
           </div>
 
-          {/* ── SCENARIO SELECTOR ── */}
-          <div style={{ background:"#fff", border:"1px solid #E2E8F0", borderRadius:18, padding:"18px 24px", marginBottom:20, boxShadow:"0 2px 16px rgba(0,0,0,0.04)" }}>
-            <div style={{ display:"flex", alignItems:"center", gap:14, flexWrap:"wrap" }}>
-              <span style={{ fontSize:11, fontWeight:800, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", flexShrink:0 }}>Load Scenario</span>
-              <div style={{ width:1, height:20, background:"#E2E8F0" }} />
-              <div style={{ display:"flex", gap:10, flexWrap:"wrap", flex:1 }}>
-                {Object.entries(PRESETS).map(([k, p]) => {
-                  const active = preset === k;
-                  const c = presetColors[k];
-                  return (
-                    <button key={k} onClick={() => load(k)} style={{
-                      padding:"8px 18px", borderRadius:99, fontSize:13, fontWeight:700, cursor:"pointer",
-                      background: active ? c : "#F8FAFC",
-                      color: active ? "#fff" : "#64748B",
-                      border: `2px solid ${active ? c : "#E2E8F0"}`,
-                      boxShadow: active ? `0 4px 16px ${c}45` : "none",
-                      transition:"all 0.2s",
-                    }}>
-                      {p.emoji} {p.label}
-                    </button>
-                  );
-                })}
-              </div>
-              {preset && (
-                <span style={{ fontSize:12, color:"#94A3B8", maxWidth:280, lineHeight:1.5 }}>{PRESETS[preset]?.desc}</span>
-              )}
-            </div>
-          </div>
-
-          {/* ── TABS ── */}
-          <div style={{ display:"flex", gap:8, marginBottom:20 }}>
-            {[["visual","🔬  Visual Overview"], ["logic","🌿  Decision Tree"], ["code","⚡  Code Reference"]].map(([k, label]) => (
-              <button key={k} onClick={() => setTab(k)} style={{
-                padding:"11px 24px", borderRadius:12, fontSize:13, fontWeight:700, cursor:"pointer",
-                background: tab === k ? "#6366F1" : "#fff",
-                color: tab === k ? "#fff" : "#64748B",
-                border: `2px solid ${tab === k ? "#6366F1" : "#E2E8F0"}`,
-                boxShadow: tab === k ? "0 4px 20px #6366F145" : "0 1px 4px rgba(0,0,0,0.04)",
-                transition:"all 0.2s",
-              }}>{label}</button>
-            ))}
-          </div>
-
-          {/* ════════════ VISUAL TAB ════════════ */}
-          {tab === "visual" && (
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 320px", gap:20 }}>
-
-              {/* BACTERIAL PANEL */}
-              <div style={{
-                background:"#fff", borderRadius:22, padding:24,
-                border:`2px solid ${r.bacterialFired ? "#FCA5A5" : "#E2E8F0"}`,
-                boxShadow: r.bacterialFired ? "0 8px 44px #EF444422" : "0 2px 18px rgba(0,0,0,0.05)",
-                transition:"all 0.35s",
-              }}>
-                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
-                  <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-                    <div style={{
-                      width:48, height:48, borderRadius:16,
-                      background: r.bacterialFired ? "linear-gradient(135deg,#EF4444,#DC2626)" : "#FFF5F5",
-                      display:"flex", alignItems:"center", justifyContent:"center", fontSize:22,
-                      boxShadow: r.bacterialFired ? "0 6px 20px #EF444450" : "none",
-                      transition:"all 0.3s",
-                    }}>🦠</div>
-                    <div>
-                      <div style={{ fontWeight:900, fontSize:16, color: r.bacterialFired ? "#EF4444" : "#1E293B" }}>Bacterial Screen</div>
-                      <div style={{ fontSize:12, color:"#94A3B8", marginTop:2 }}>WBC · Neutrophils · CRP</div>
-                    </div>
-                  </div>
-                  <div style={{
-                    padding:"6px 14px", borderRadius:99, fontSize:13, fontWeight:800,
-                    background: r.bacterialFired ? "#EF4444" : "#F1F5F9",
-                    color: r.bacterialFired ? "#fff" : "#64748B",
-                    boxShadow: r.bacterialFired ? "0 4px 14px #EF444445" : "none",
-                    transition:"all 0.3s",
-                  }}>{r.bScore}/3 fired</div>
-                </div>
-
-                <div style={{ background:"#FFF5F5", borderRadius:14, padding:"12px 16px", marginBottom:18, border:"1px solid #FEE2E2" }}>
-                  <div style={{ fontSize:11, color:"#94A3B8", marginBottom:5, fontWeight:700, textTransform:"uppercase", letterSpacing:0.8 }}>Rule</div>
-                  <div style={{ fontSize:13, color:"#1E293B", fontFamily:"'JetBrains Mono',monospace", lineHeight:2 }}>
-                    <span style={{ color:"#EF4444", fontWeight:700 }}>WBC {">"} 15</span>
-                    <span style={{ color:"#94A3B8" }}> or </span>
-                    <span style={{ color:"#EF4444", fontWeight:700 }}>NEUT {">"} 80%</span>
-                    <span style={{ color:"#94A3B8" }}> or </span>
-                    <span style={{ color:"#EF4444", fontWeight:700 }}>CRP {">"} 50</span>
-                    <br />
-                    <span style={{ color:"#6366F1", fontWeight:700 }}>→ fires when 2 or more breach</span>
+          <div style={{ position:"relative", zIndex:1 }}>
+            {/* ── HEADER ── */}
+            <div style={{ background:"rgba(255,255,255,0.88)", backdropFilter:"blur(20px)", borderBottom:"1px solid #E2E8F0", padding:"0 36px", boxShadow:"0 2px 24px rgba(0,0,0,0.06)", position:"sticky", top:0, zIndex:100 }}>
+              <div style={{ maxWidth:1380, margin:"0 auto", display:"flex", alignItems:"center", justifyContent:"space-between", height:70, flexWrap:"wrap", gap:12 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:18 }}>
+                  <div style={{ width:48, height:48, borderRadius:16, background:"linear-gradient(135deg,#6366F1,#8B5CF6)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, boxShadow:"0 6px 20px #6366F155", flexShrink:0 }}>🧬</div>
+                  <div>
+                    <div style={{ fontWeight:900, fontSize:18, color:"#0F172A", letterSpacing:-0.4 }}>Burak Multiomics</div>
+                    <div style={{ fontSize:12, color:"#94A3B8", fontWeight:500 }}>AMS Engine · Antimicrobial Screening Layer</div>
                   </div>
                 </div>
-
-                <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-                  {["WBC","NEUT","CRP"].map((id) => (
-                    <MarkerCard key={id} id={id} value={vals[id]} onChange={setVal(id)}
-                      fired={id === "WBC" ? r.bWBC : id === "NEUT" ? r.bNEUT : r.bCRP} group="B" />
-                  ))}
-                </div>
-
-                {r.bacterialFired && (
-                  <div style={{ marginTop:16, padding:"14px 16px", background:"linear-gradient(135deg,#FEF2F2,#FEE2E2)", border:"2px solid #FECACA", borderRadius:14, boxShadow:"0 4px 20px #EF444420" }}>
-                    <div style={{ fontWeight:900, fontSize:14, color:"#DC2626" }}>⛔ Bacterial Confirmed — Quarantine</div>
-                    <div style={{ fontSize:12, color:"#EF4444", marginTop:5 }}>Report isolated. Will not enter Clinical Layer.</div>
-                  </div>
-                )}
-              </div>
-
-              {/* VIRAL PANEL */}
-              <div style={{
-                background:"#fff", borderRadius:22, padding:24,
-                border:`2px solid ${r.viralFired ? "#C4B5FD" : "#E2E8F0"}`,
-                boxShadow: r.viralFired ? "0 8px 44px #8B5CF622" : "0 2px 18px rgba(0,0,0,0.05)",
-                transition:"all 0.35s",
-              }}>
-                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
-                  <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-                    <div style={{
-                      width:48, height:48, borderRadius:16,
-                      background: r.viralFired ? "linear-gradient(135deg,#8B5CF6,#7C3AED)" : "#F5F3FF",
-                      display:"flex", alignItems:"center", justifyContent:"center", fontSize:22,
-                      boxShadow: r.viralFired ? "0 6px 20px #8B5CF650" : "none",
-                      transition:"all 0.3s",
-                    }}>🔬</div>
-                    <div>
-                      <div style={{ fontWeight:900, fontSize:16, color: r.viralFired ? "#8B5CF6" : "#1E293B" }}>Viral Screen</div>
-                      <div style={{ fontSize:12, color:"#94A3B8", marginTop:2 }}>Platelets · Lymphocytes · LDH</div>
-                    </div>
-                  </div>
-                  <div style={{
-                    padding:"6px 14px", borderRadius:99, fontSize:13, fontWeight:800,
-                    background: r.viralFired ? "#8B5CF6" : "#F1F5F9",
-                    color: r.viralFired ? "#fff" : "#64748B",
-                    boxShadow: r.viralFired ? "0 4px 14px #8B5CF645" : "none",
-                    transition:"all 0.3s",
-                  }}>{r.vScore}/3 fired</div>
-                </div>
-
-                <div style={{ background:"#F5F3FF", borderRadius:14, padding:"12px 16px", marginBottom:10, border:"1px solid #EDE9FE" }}>
-                  <div style={{ fontSize:11, color:"#94A3B8", marginBottom:5, fontWeight:700, textTransform:"uppercase", letterSpacing:0.8 }}>Rule</div>
-                  <div style={{ fontSize:13, color:"#1E293B", fontFamily:"'JetBrains Mono',monospace", lineHeight:2 }}>
-                    <span style={{ color:"#8B5CF6", fontWeight:700 }}>PLT {"<"} 100</span>
-                    <span style={{ color:"#94A3B8", fontWeight:700 }}> AND </span>
-                    <span style={{ color:"#8B5CF6", fontWeight:700 }}>LYMPH {"<"} 15%</span>
-                    <span style={{ color:"#94A3B8", fontWeight:700 }}> AND </span>
-                    <span style={{ color:"#8B5CF6", fontWeight:700 }}>LDH {">"} 400</span>
-                    <br />
-                    <span style={{ color:"#6366F1", fontWeight:700 }}>→ fires ONLY when ALL 3 breach</span>
-                  </div>
-                </div>
-
-                <div style={{ background:"#FFFBEB", borderRadius:12, padding:"10px 14px", marginBottom:18, border:"1px solid #FDE68A" }}>
-                  <div style={{ fontSize:12, color:"#92400E", lineHeight:1.7, fontWeight:500 }}>
-                    <strong>⚠ Why ALL 3?</strong> PLT + Lymphocytes feed your Layer 3 SII formula (P×N/L). A partial drop = chronic drift signal — your most valuable data. LDH spike confirms it is truly acute viral, not drift.
-                  </div>
-                </div>
-
-                <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-                  {["PLT","LYMPH","LDH"].map((id) => (
-                    <MarkerCard key={id} id={id} value={vals[id]} onChange={setVal(id)}
-                      fired={id === "PLT" ? r.vPLT : id === "LYMPH" ? r.vLYMPH : r.vLDH} group="V" />
-                  ))}
-                </div>
-
-                {r.viralFired && (
-                  <div style={{ marginTop:16, padding:"14px 16px", background:"linear-gradient(135deg,#F5F3FF,#EDE9FE)", border:"2px solid #C4B5FD", borderRadius:14, boxShadow:"0 4px 20px #8B5CF620" }}>
-                    <div style={{ fontWeight:900, fontSize:14, color:"#7C3AED" }}>⛔ Viral Confirmed — Quarantine</div>
-                    <div style={{ fontSize:12, color:"#8B5CF6", marginTop:5 }}>All 3 markers breached. Report isolated.</div>
-                  </div>
-                )}
-              </div>
-
-              {/* RIGHT COLUMN */}
-              <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-
-                {/* Data flow */}
-                <div style={{ background:"#fff", borderRadius:20, padding:20, border:"1px solid #E2E8F0", boxShadow:"0 2px 14px rgba(0,0,0,0.04)" }}>
-                  <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:16 }}>Data Flow</div>
-                  {[
-                    { label:"📥 INGESTION",       sub:"Batch normalised",                   done:true,  blocked:false, active:false, color:"#059669" },
-                    { label:"🛡️ AMS SCREEN",      sub:"Active — you are here",              done:false, blocked:false, active:true,  color:statusConfig.color },
-                    { label: r.quarantine ? "⛔ QUARANTINE" : "🏥 CLINICAL LAYER",
-                      sub:   r.quarantine ? "Report isolated" : "8-layer cascade",          done:false, blocked:r.quarantine, active:false, color: r.quarantine ? "#EF4444" : "#6366F1" },
-                    { label:"📊 POPULATION",       sub:"Aggregated intel",                   done:false, blocked:r.quarantine, active:false, color:"#94A3B8" },
-                  ].map((step, i) => (
-                    <div key={i}>
-                      <div style={{
-                        padding:"12px 16px", borderRadius:14, transition:"all 0.35s",
-                        background: step.active ? `linear-gradient(135deg,${step.color}18,${step.color}28)` : step.done ? "#F0FDF4" : step.blocked ? "#FEF2F2" : "#F8FAFC",
-                        border: `2px solid ${step.active ? step.color+"60" : step.done ? "#BBF7D0" : step.blocked ? "#FECACA" : "#E2E8F0"}`,
-                        boxShadow: step.active ? `0 4px 18px ${step.color}28` : "none",
-                      }}>
-                        <div style={{ fontWeight:800, fontSize:12, color: step.active ? step.color : step.done ? "#16A34A" : step.blocked ? "#DC2626" : "#94A3B8" }}>{step.label}</div>
-                        <div style={{ fontSize:11, color: step.blocked ? "#FCA5A5" : "#94A3B8", marginTop:3 }}>{step.sub}</div>
-                      </div>
-                      {i < 3 && (
-                        <div style={{ display:"flex", justifyContent:"center", height:16 }}>
-                          <div style={{ width:2, height:"100%", background: i === 0 ? "#BBF7D0" : r.quarantine && i >= 1 ? "#FECACA" : "#E2E8F0", transition:"background 0.3s", borderRadius:99 }} />
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-
-                {/* Drift box */}
-                <div style={{
-                  background: r.drift.length > 0 && !r.quarantine ? "linear-gradient(135deg,#FFFBEB,#FEF9C3)" : "#fff",
-                  border: `2px solid ${r.drift.length > 0 && !r.quarantine ? "#FDE68A" : "#E2E8F0"}`,
-                  borderRadius:18, padding:18, transition:"all 0.35s",
-                  boxShadow: r.drift.length > 0 && !r.quarantine ? "0 4px 22px #F59E0B22" : "0 2px 10px rgba(0,0,0,0.04)",
-                }}>
-                  <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:12 }}>Sub-Clinical Drift</div>
-                  {r.drift.length > 0 && !r.quarantine ? (
-                    <>
-                      <div style={{ fontWeight:900, fontSize:15, color:"#D97706", marginBottom:10 }}>⚡ {r.drift.length} velocity signal{r.drift.length > 1 ? "s" : ""}</div>
-                      {r.drift.map((f, i) => (
-                        <div key={i} style={{ fontSize:12, color:"#92400E", padding:"5px 0", borderBottom:"1px solid #FDE68A", display:"flex", alignItems:"center", gap:8, fontWeight:600 }}>
-                          <span style={{ color:"#F59E0B" }}>→</span> {f}
-                        </div>
-                      ))}
-                      <div style={{ marginTop:12, fontSize:12, color:"#B45309", lineHeight:1.7, fontWeight:500 }}>
-                        These are velocity vectors. They PASS to Clinical Layer and feed the Singapore model.
-                      </div>
-                    </>
-                  ) : r.quarantine ? (
-                    <div style={{ fontSize:12, color:"#94A3B8" }}>Report quarantined — drift analysis not applicable.</div>
-                  ) : (
-                    <div style={{ fontSize:12, color:"#94A3B8" }}>No drift signals. Clean pass.</div>
-                  )}
-                </div>
-
-                {/* Decision rules */}
-                <div style={{ background:"#fff", border:"1px solid #E2E8F0", borderRadius:18, padding:18, boxShadow:"0 2px 10px rgba(0,0,0,0.04)" }}>
-                  <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:14 }}>Decision Rules</div>
-                  {[
-                    ["🔴 Bacterial",  "≥ 2 of WBC · NEUT · CRP",    "#EF4444"],
-                    ["🟣 Viral",      "ALL 3 of PLT · LYMPH · LDH",  "#8B5CF6"],
-                    ["🟠 Mixed",      "Both patterns fire",           "#F97316"],
-                    ["🟡 Drift",      "Elevated, below threshold",    "#D97706"],
-                    ["🟢 Clean Pass", "Nothing fires",                "#059669"],
-                  ].map(([label, rule, c], i) => (
-                    <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"7px 0", borderBottom: i < 4 ? "1px solid #F1F5F9" : "none" }}>
-                      <span style={{ fontSize:13, fontWeight:700, color:c }}>{label}</span>
-                      <span style={{ fontSize:11, color:"#94A3B8", textAlign:"right", maxWidth:140 }}>{rule}</span>
+                <div style={{ display:"flex", alignItems:"center", background:"#F8FAFC", borderRadius:14, padding:"8px 12px", border:"1px solid #E2E8F0", gap:0 }}>
+                  {[["INGESTION","#94A3B8",false],["AMS","#6366F1",true],["CLINICAL","#CBD5E1",false],["POPULATION","#CBD5E1",false]].map(([s,c,a],i) => (
+                    <div key={i} style={{ display:"flex", alignItems:"center" }}>
+                      {i > 0 && <div style={{ width:20, height:2, background: i===1 ? "#6366F1" : "#E2E8F0", borderRadius:99 }} />}
+                      <div style={{ padding:"6px 14px", borderRadius:10, fontSize:11, fontWeight:800, background: a ? "linear-gradient(135deg,#6366F1,#8B5CF6)" : "transparent", color: a ? "#fff" : c, boxShadow: a ? "0 3px 12px #6366F145" : "none", letterSpacing:0.5 }}>{s}</div>
                     </div>
                   ))}
                 </div>
               </div>
             </div>
-          )}
 
-          {/* ════════════ LOGIC TAB ════════════ */}
-          {tab === "logic" && (
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 320px", gap:18 }}>
-              <div style={{ background:"#fff", borderRadius:22, padding:32, border:"1px solid #E2E8F0", boxShadow:"0 2px 20px rgba(0,0,0,0.05)" }}>
-                <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:28 }}>Decision Tree — Live State</div>
+            <div style={{ maxWidth:1380, margin:"0 auto", padding:"28px 36px" }}>
 
-                <div style={{ display:"flex", flexDirection:"column", alignItems:"center" }}>
-                  {/* Entry */}
-                  <div style={{ padding:"14px 36px", borderRadius:16, background:"linear-gradient(135deg,#EEF2FF,#E0E7FF)", border:"2px solid #A5B4FC", boxShadow:"0 4px 22px #6366F125", minWidth:220, textAlign:"center" }}>
-                    <div style={{ fontWeight:900, fontSize:15, color:"#4F46E5" }}>📥 REPORT RECEIVED</div>
-                    <div style={{ fontSize:12, color:"#818CF8", marginTop:3 }}>from ingestion layer</div>
+              {/* ── STATUS BANNER ── */}
+              <div key={statusConfig.label} className="fi" style={{ background:statusConfig.bg, border:`2px solid ${statusConfig.border}`, borderRadius:22, padding:"22px 32px", marginBottom:22, boxShadow:`0 10px 48px ${statusConfig.color}22`, display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:16 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:18 }}>
+                  <div style={{ width:64, height:64, borderRadius:20, background:`linear-gradient(135deg,${statusConfig.color}22,${statusConfig.color}44)`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:30, border:`2px solid ${statusConfig.color}50`, boxShadow:`0 6px 24px ${statusConfig.color}30`, flexShrink:0 }}>{statusConfig.icon}</div>
+                  <div>
+                    <div style={{ fontWeight:900, fontSize:20, color:statusConfig.color, letterSpacing:-0.4 }}>{statusConfig.label}</div>
+                    {r.drift.length > 0 && !r.quarantine && <div style={{ fontSize:13, color:"#D97706", marginTop:5, fontWeight:600 }}>Drift signals: {r.drift.join(" · ")}</div>}
+                    {r.quarantine && <div style={{ fontSize:13, color:statusConfig.color, marginTop:5, opacity:0.8 }}>Report isolated — will not proceed to Clinical Layer.</div>}
                   </div>
-                  <div style={{ width:2, height:28, background:"#A5B4FC" }} />
-
-                  {/* Bacterial check */}
-                  <div style={{ padding:"14px 30px", borderRadius:16, background: r.bacterialFired ? "linear-gradient(135deg,#FEF2F2,#FEE2E2)" : "#FFF5F5", border:`2px solid ${r.bacterialFired ? "#F87171" : "#FCA5A5"}`, boxShadow: r.bacterialFired ? "0 4px 22px #EF444428" : "none", minWidth:240, textAlign:"center", transition:"all 0.35s" }}>
-                    <div style={{ fontWeight:900, fontSize:15, color: r.bacterialFired ? "#DC2626" : "#EF4444" }}>🦠 BACTERIAL CHECK</div>
-                    <div style={{ fontSize:12, color:"#94A3B8", marginTop:4 }}>WBC {">"} 15 · NEUT {">"} 80% · CRP {">"} 50</div>
-                    <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:13, fontWeight:700, color: r.bacterialFired ? "#DC2626" : "#94A3B8", marginTop:5 }}>{r.bScore}/3 scored</div>
-                  </div>
-
-                  {/* Branch row */}
-                  <div style={{ display:"flex", width:"100%", justifyContent:"center", gap:100, alignItems:"flex-start" }}>
-                    {/* YES branch */}
-                    <div style={{ display:"flex", flexDirection:"column", alignItems:"center" }}>
-                      <div style={{ width:2, height:28, background: r.bacterialFired ? "#F87171" : "#E2E8F0", transition:"background 0.3s" }} />
-                      <div style={{ fontSize:11, fontWeight:700, color: r.bacterialFired ? "#EF4444" : "#CBD5E1", marginBottom:7, fontFamily:"'JetBrains Mono',monospace" }}>≥ 2 fires</div>
-                      <div style={{ padding:"14px 22px", borderRadius:16, background: r.bacterialFired ? "linear-gradient(135deg,#EF4444,#DC2626)" : "#F8FAFC", border:`2px solid ${r.bacterialFired ? "#EF4444" : "#E2E8F0"}`, textAlign:"center", transition:"all 0.35s", boxShadow: r.bacterialFired ? "0 8px 28px #EF444445" : "none", minWidth:150 }}>
-                        <div style={{ fontWeight:900, fontSize:15, color: r.bacterialFired ? "#fff" : "#CBD5E1" }}>⛔ QUARANTINE</div>
-                        <div style={{ fontSize:12, color: r.bacterialFired ? "rgba(255,255,255,0.8)" : "#E2E8F0", marginTop:3 }}>BACTERIAL</div>
-                      </div>
-                    </div>
-
-                    {/* NO branch */}
-                    <div style={{ display:"flex", flexDirection:"column", alignItems:"center" }}>
-                      <div style={{ width:2, height:28, background: !r.bacterialFired ? "#A5B4FC" : "#E2E8F0", transition:"background 0.3s" }} />
-                      <div style={{ fontSize:11, fontWeight:700, color: !r.bacterialFired ? "#6366F1" : "#CBD5E1", marginBottom:7, fontFamily:"'JetBrains Mono',monospace" }}>{"<"} 2 fires</div>
-                      <div style={{ padding:"14px 28px", borderRadius:16, background: !r.bacterialFired ? "linear-gradient(135deg,#F5F3FF,#EDE9FE)" : "#F8FAFC", border:`2px solid ${!r.bacterialFired ? "#C4B5FD" : "#E2E8F0"}`, minWidth:240, textAlign:"center", transition:"all 0.35s", boxShadow: !r.bacterialFired ? "0 4px 22px #8B5CF622" : "none" }}>
-                        <div style={{ fontWeight:900, fontSize:15, color: !r.bacterialFired ? "#7C3AED" : "#CBD5E1" }}>🔬 VIRAL CHECK</div>
-                        <div style={{ fontSize:12, color:"#94A3B8", marginTop:4 }}>PLT {"<"} 100 · LYMPH {"<"} 15% · LDH {">"} 400</div>
-                        <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:13, fontWeight:700, color: !r.bacterialFired ? "#7C3AED" : "#E2E8F0", marginTop:5 }}>{r.vScore}/3 scored</div>
-                      </div>
-
-                      <div style={{ display:"flex", gap:60, alignItems:"flex-start" }}>
-                        {/* VIRAL YES */}
-                        <div style={{ display:"flex", flexDirection:"column", alignItems:"center" }}>
-                          <div style={{ width:2, height:28, background: r.viralFired ? "#C4B5FD" : "#E2E8F0", transition:"background 0.3s" }} />
-                          <div style={{ fontSize:11, fontWeight:700, color: r.viralFired ? "#8B5CF6" : "#CBD5E1", marginBottom:7, fontFamily:"'JetBrains Mono',monospace" }}>all 3 fire</div>
-                          <div style={{ padding:"14px 22px", borderRadius:16, background: r.viralFired ? "linear-gradient(135deg,#8B5CF6,#7C3AED)" : "#F8FAFC", border:`2px solid ${r.viralFired ? "#8B5CF6" : "#E2E8F0"}`, textAlign:"center", transition:"all 0.35s", boxShadow: r.viralFired ? "0 8px 28px #8B5CF645" : "none", minWidth:150 }}>
-                            <div style={{ fontWeight:900, fontSize:15, color: r.viralFired ? "#fff" : "#CBD5E1" }}>⛔ QUARANTINE</div>
-                            <div style={{ fontSize:12, color: r.viralFired ? "rgba(255,255,255,0.8)" : "#E2E8F0", marginTop:3 }}>VIRAL</div>
-                          </div>
-                        </div>
-
-                        {/* VIRAL NO */}
-                        <div style={{ display:"flex", flexDirection:"column", alignItems:"center" }}>
-                          <div style={{ width:2, height:28, background: !r.quarantine ? "#6EE7B7" : "#E2E8F0", transition:"background 0.3s" }} />
-                          <div style={{ fontSize:11, fontWeight:700, color: !r.quarantine ? "#059669" : "#CBD5E1", marginBottom:7, fontFamily:"'JetBrains Mono',monospace" }}>{"<"} 3 fires</div>
-                          <div style={{ padding:"11px 18px", borderRadius:14, background:"#FFFBEB", border:"2px solid #FDE68A", textAlign:"center", minWidth:140 }}>
-                            <div style={{ fontWeight:800, fontSize:13, color:"#D97706" }}>⚡ DRIFT SCAN</div>
-                            <div style={{ fontSize:11, color:"#92400E", marginTop:3 }}>{r.drift.length} signals found</div>
-                          </div>
-                          <div style={{ width:2, height:22, background: !r.quarantine ? "#6EE7B7" : "#E2E8F0", transition:"background 0.3s" }} />
-                          <div style={{ padding:"16px 22px", borderRadius:16, background: !r.quarantine ? `linear-gradient(135deg,${statusConfig.color}18,${statusConfig.color}32)` : "#F8FAFC", border:`2px solid ${!r.quarantine ? statusConfig.color + "55" : "#E2E8F0"}`, textAlign:"center", transition:"all 0.35s", boxShadow: !r.quarantine ? `0 8px 28px ${statusConfig.color}28` : "none", minWidth:155 }}>
-                            <div style={{ fontWeight:900, fontSize:15, color: !r.quarantine ? statusConfig.color : "#CBD5E1" }}>
-                              {r.drift.length > 0 ? "✅ PASS + FLAG" : "✅ CLEAN PASS"}
-                            </div>
-                            <div style={{ fontSize:12, color: !r.quarantine ? statusConfig.color + "99" : "#E2E8F0", marginTop:3 }}>→ Clinical Layer</div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
+                </div>
+                <div style={{ display:"flex", gap:28, alignItems:"center" }}>
+                  <ScoreRing score={r.bScore} max={3} fired={r.bacterialFired} color="#EF4444" label="Bacterial" />
+                  <ScoreRing score={r.vScore} max={3} fired={r.viralFired}    color="#8B5CF6" label="Viral" />
                 </div>
               </div>
 
-              {/* Step trace */}
-              <div style={{ background:"#fff", border:"1px solid #E2E8F0", borderRadius:22, padding:22, boxShadow:"0 2px 14px rgba(0,0,0,0.04)" }}>
-                <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:16 }}>Step-by-Step Trace</div>
-                {[
-                  { n:1, txt:"Report arrives from ingestion",           col:"#6366F1", bg:"#EEF2FF" },
-                  { n:2, txt:`WBC: ${vals.WBC.toFixed(1)} → ${r.bWBC ? "⚡ BREACH" : "✓ ok"}`,   col: r.bWBC  ? "#EF4444" : "#94A3B8", bg: r.bWBC  ? "#FEF2F2" : "#F8FAFC" },
-                  { n:3, txt:`NEUT: ${vals.NEUT.toFixed(1)}% → ${r.bNEUT ? "⚡ BREACH" : "✓ ok"}`, col: r.bNEUT ? "#EF4444" : "#94A3B8", bg: r.bNEUT ? "#FEF2F2" : "#F8FAFC" },
-                  { n:4, txt:`CRP: ${vals.CRP.toFixed(1)} → ${r.bCRP ? "⚡ BREACH" : "✓ ok"}`,   col: r.bCRP  ? "#EF4444" : "#94A3B8", bg: r.bCRP  ? "#FEF2F2" : "#F8FAFC" },
-                  { n:5, txt:`Bacterial ${r.bScore}/3 → ${r.bacterialFired ? "QUARANTINE" : "continue"}`, col: r.bacterialFired ? "#DC2626" : "#059669", bg: r.bacterialFired ? "#FEE2E2" : "#F0FDF4", bold:true },
-                  ...(!r.bacterialFired ? [
-                    { n:6, txt:`PLT: ${vals.PLT.toFixed(1)} → ${r.vPLT ? "⚡ BREACH" : "✓ ok"}`,     col: r.vPLT   ? "#8B5CF6" : "#94A3B8", bg: r.vPLT   ? "#F5F3FF" : "#F8FAFC" },
-                    { n:7, txt:`LYMPH: ${vals.LYMPH.toFixed(1)}% → ${r.vLYMPH ? "⚡ BREACH" : "✓ ok"}`, col: r.vLYMPH ? "#8B5CF6" : "#94A3B8", bg: r.vLYMPH ? "#F5F3FF" : "#F8FAFC" },
-                    { n:8, txt:`LDH: ${vals.LDH.toFixed(1)} → ${r.vLDH ? "⚡ BREACH" : "✓ ok"}`,     col: r.vLDH   ? "#8B5CF6" : "#94A3B8", bg: r.vLDH   ? "#F5F3FF" : "#F8FAFC" },
-                    { n:9, txt:`Viral ${r.vScore}/3 → ${r.viralFired ? "QUARANTINE" : "continue"}`,   col: r.viralFired ? "#7C3AED" : "#059669", bg: r.viralFired ? "#EDE9FE" : "#F0FDF4", bold:true },
-                    ...(!r.quarantine ? [
-                      { n:10, txt:`Drift: ${r.drift.length} signal${r.drift.length !== 1 ? "s" : ""}`, col: r.drift.length > 0 ? "#D97706" : "#059669", bg: r.drift.length > 0 ? "#FFFBEB" : "#F0FDF4" },
-                      { n:11, txt:`→ PASS TO CLINICAL${r.drift.length > 0 ? " (drift flagged)" : ""}`, col: statusConfig.color, bg:"#F0FDF4", bold:true },
-                    ] : [])
-                  ] : [])
-                ].map((row) => (
-                  <div key={row.n} style={{ display:"flex", gap:10, alignItems:"center", padding:"8px 12px", borderRadius:10, background:row.bg, marginBottom:5, transition:"background 0.3s" }}>
-                    <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:11, color:"#CBD5E1", minWidth:22, fontWeight:700 }}>{row.n}.</span>
-                    <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:12, color:row.col, fontWeight: row.bold ? 900 : 500 }}>{row.txt}</span>
+              {/* ── SCENARIO SELECTOR ── */}
+              <div style={{ background:"#fff", border:"1px solid #E2E8F0", borderRadius:18, padding:"18px 24px", marginBottom:20, boxShadow:"0 2px 16px rgba(0,0,0,0.04)" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:14, flexWrap:"wrap" }}>
+                  <span style={{ fontSize:11, fontWeight:800, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", flexShrink:0 }}>Load Scenario</span>
+                  <div style={{ width:1, height:20, background:"#E2E8F0", flexShrink:0 }} />
+                  <div style={{ display:"flex", gap:10, flexWrap:"wrap", flex:1 }}>
+                    {Object.entries(PRESETS).map(([k, p]) => {
+                      const active = preset === k;
+                      const c = presetColors[k];
+                      return (
+                        <button key={k} onClick={() => load(k)} style={{ padding:"8px 18px", borderRadius:99, fontSize:13, fontWeight:700, cursor:"pointer", background: active ? c : "#F8FAFC", color: active ? "#fff" : "#64748B", border:`2px solid ${active ? c : "#E2E8F0"}`, boxShadow: active ? `0 4px 16px ${c}45` : "none", transition:"all 0.2s" }}>
+                          {p.emoji} {p.label}
+                        </button>
+                      );
+                    })}
                   </div>
+                  {preset && <span style={{ fontSize:12, color:"#94A3B8", maxWidth:280, lineHeight:1.5 }}>{PRESETS[preset]?.desc}</span>}
+                </div>
+              </div>
+
+              {/* ── TABS ── */}
+              <div style={{ display:"flex", gap:8, marginBottom:20, flexWrap:"wrap" }}>
+                {[["visual","🔬  Visual Overview"],["logic","🌿  Decision Tree"],["code","⚡  Code Reference"]].map(([k,label]) => (
+                  <button key={k} onClick={() => setTab(k)} style={{ padding:"11px 24px", borderRadius:12, fontSize:13, fontWeight:700, cursor:"pointer", background: tab===k ? "#6366F1" : "#fff", color: tab===k ? "#fff" : "#64748B", border:`2px solid ${tab===k ? "#6366F1" : "#E2E8F0"}`, boxShadow: tab===k ? "0 4px 20px #6366F145" : "0 1px 4px rgba(0,0,0,0.04)", transition:"all 0.2s" }}>{label}</button>
                 ))}
               </div>
-            </div>
-          )}
 
-          {/* ════════════ CODE TAB ════════════ */}
-          {tab === "code" && (
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:18 }}>
-              <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-                <div style={{ background:"#fff", borderRadius:18, padding:22, border:"1px solid #E2E8F0", boxShadow:"0 2px 14px rgba(0,0,0,0.04)" }}>
-                  <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:12 }}>Threshold Constants — paste into CF2</div>
-                  <CodeBlock lines={[
-                    "// ── BACTERIAL ─────────────────────────",
-                    "const WBC_FIRE_ABOVE    = 15.0  // ×10³/μL",
-                    "const NEUT_FIRE_ABOVE   = 80.0  // %",
-                    "const CRP_FIRE_ABOVE    = 50.0  // mg/L",
-                    "const BACTERIAL_MIN     = 2     // of 3",
-                    "",
-                    "// ── VIRAL ──────────────────────────────",
-                    "const PLT_FIRE_BELOW    = 100   // ×10³/μL",
-                    "const LYMPH_FIRE_BELOW  = 15.0  // %",
-                    "const LDH_FIRE_ABOVE    = 400   // U/L",
-                    "const VIRAL_MIN         = 3     // ALL 3 required",
-                    "",
-                    "// ── DRIFT (pass-through, never quarantine)",
-                    "const WBC_DRIFT         = 11.0",
-                    "const CRP_DRIFT         = 10.0",
-                    "const PLT_DRIFT         = 150",
-                    "const LYMPH_DRIFT       = 20.0",
-                    "const LDH_DRIFT         = 280",
-                  ]} />
-                </div>
+              {/* ══ VISUAL TAB ══ */}
+              {tab === "visual" && (
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))", gap:20 }}>
 
-                <div style={{ background:"#fff", borderRadius:18, padding:22, border:"1px solid #E2E8F0", boxShadow:"0 2px 14px rgba(0,0,0,0.04)" }}>
-                  <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:12 }}>AMS Main Function</div>
-                  <CodeBlock lines={[
-                    "function runAMS(report) {",
-                    "",
-                    "  // STEP 1 — Bacterial (2-of-3)",
-                    "  const bWBC  = report.WBC  > WBC_FIRE_ABOVE",
-                    "  const bNEUT = report.NEUT > NEUT_FIRE_ABOVE",
-                    "  const bCRP  = report.CRP  > CRP_FIRE_ABOVE",
-                    "  const bScore = count(bWBC, bNEUT, bCRP)",
-                    "",
-                    "  if (bScore >= BACTERIAL_MIN)",
-                    "    return { status: QUARANTINE, type: 'BACTERIAL' }",
-                    "",
-                    "  // STEP 2 — Viral (ALL 3 required)",
-                    "  const vPLT   = report.PLT   < PLT_FIRE_BELOW",
-                    "  const vLYMPH = report.LYMPH < LYMPH_FIRE_BELOW",
-                    "  const vLDH   = report.LDH   > LDH_FIRE_ABOVE",
-                    "  const vScore = count(vPLT, vLYMPH, vLDH)",
-                    "",
-                    "  if (vScore === VIRAL_MIN)",
-                    "    return { status: QUARANTINE, type: 'VIRAL' }",
-                    "",
-                    "  // STEP 3 — Drift scan (always PASS)",
-                    "  const drift = detectDrift(report)",
-                    "  return { status: PASS, drift }",
-                    "}",
-                  ]} />
-                </div>
-              </div>
-
-              <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-                <div style={{ background:"#fff", borderRadius:18, padding:22, border:"1px solid #E2E8F0", boxShadow:"0 2px 14px rgba(0,0,0,0.04)" }}>
-                  <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:12 }}>Drift Detection — velocity signals, never quarantine</div>
-                  <CodeBlock lines={[
-                    "function detectDrift(report) {",
-                    "  const flags = []",
-                    "",
-                    "  if (report.WBC   > WBC_DRIFT)   flags.push('WBC elevated')",
-                    "  if (report.CRP   > CRP_DRIFT)   flags.push('CRP elevated')",
-                    "  if (report.PLT   < PLT_DRIFT)   flags.push('PLT suppressed')",
-                    "  if (report.LYMPH < LYMPH_DRIFT) flags.push('Lymphocytes low')",
-                    "  if (report.LDH   > LDH_DRIFT)   flags.push('LDH elevated')",
-                    "",
-                    "  // Attach to report — Clinical Layer uses these",
-                    "  return flags",
-                    "}",
-                  ]} />
-                </div>
-
-                {/* Live values table */}
-                <div style={{ background:"#fff", borderRadius:18, padding:22, border:"1px solid #E2E8F0", boxShadow:"0 2px 14px rgba(0,0,0,0.04)" }}>
-                  <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:14 }}>Live Values vs Thresholds</div>
-                  <div style={{ borderRadius:14, overflow:"hidden", border:"1px solid #E2E8F0" }}>
-                    <div style={{ display:"grid", gridTemplateColumns:"90px 90px 110px 100px", background:"#F8FAFC", padding:"10px 16px", borderBottom:"1px solid #E2E8F0" }}>
-                      {["Marker","Value","Threshold","Status"].map((h) => (
-                        <span key={h} style={{ fontWeight:800, fontSize:11, color:"#94A3B8", textTransform:"uppercase", letterSpacing:0.5 }}>{h}</span>
+                  {/* BACTERIAL */}
+                  <div style={{ background:"#fff", borderRadius:22, padding:24, border:`2px solid ${r.bacterialFired ? "#FCA5A5" : "#E2E8F0"}`, boxShadow: r.bacterialFired ? "0 8px 44px #EF444422" : "0 2px 18px rgba(0,0,0,0.05)", transition:"all 0.35s" }}>
+                    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                        <div style={{ width:48, height:48, borderRadius:16, background: r.bacterialFired ? "linear-gradient(135deg,#EF4444,#DC2626)" : "#FFF5F5", display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, boxShadow: r.bacterialFired ? "0 6px 20px #EF444450" : "none", transition:"all 0.3s" }}>🦠</div>
+                        <div>
+                          <div style={{ fontWeight:900, fontSize:16, color: r.bacterialFired ? "#EF4444" : "#1E293B" }}>Bacterial Screen</div>
+                          <div style={{ fontSize:12, color:"#94A3B8", marginTop:2 }}>WBC · Neutrophils · CRP</div>
+                        </div>
+                      </div>
+                      <div style={{ padding:"6px 14px", borderRadius:99, fontSize:13, fontWeight:800, background: r.bacterialFired ? "#EF4444" : "#F1F5F9", color: r.bacterialFired ? "#fff" : "#64748B", boxShadow: r.bacterialFired ? "0 4px 14px #EF444445" : "none", transition:"all 0.3s" }}>{r.bScore}/3 fired</div>
+                    </div>
+                    <div style={{ background:"#FFF5F5", borderRadius:14, padding:"12px 16px", marginBottom:18, border:"1px solid #FEE2E2" }}>
+                      <div style={{ fontSize:11, color:"#94A3B8", marginBottom:5, fontWeight:700, textTransform:"uppercase", letterSpacing:0.8 }}>Rule</div>
+                      <div style={{ fontSize:13, color:"#1E293B", fontFamily:"'JetBrains Mono',monospace", lineHeight:2 }}>
+                        <span style={{ color:"#EF4444", fontWeight:700 }}>WBC &gt; 15</span>
+                        <span style={{ color:"#94A3B8" }}> or </span>
+                        <span style={{ color:"#EF4444", fontWeight:700 }}>NEUT &gt; 80%</span>
+                        <span style={{ color:"#94A3B8" }}> or </span>
+                        <span style={{ color:"#EF4444", fontWeight:700 }}>CRP &gt; 50</span>
+                        <br /><span style={{ color:"#6366F1", fontWeight:700 }}>→ fires when 2 or more breach</span>
+                      </div>
+                    </div>
+                    <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+                      {["WBC","NEUT","CRP"].map((id) => (
+                        <MarkerCard key={id} id={id} value={vals[id]} onChange={setVal(id)} fired={id==="WBC"?r.bWBC:id==="NEUT"?r.bNEUT:r.bCRP} group="B" />
                       ))}
                     </div>
+                    {r.bacterialFired && (
+                      <div style={{ marginTop:16, padding:"14px 16px", background:"linear-gradient(135deg,#FEF2F2,#FEE2E2)", border:"2px solid #FECACA", borderRadius:14, boxShadow:"0 4px 20px #EF444420" }}>
+                        <div style={{ fontWeight:900, fontSize:14, color:"#DC2626" }}>⛔ Bacterial Confirmed — Quarantine</div>
+                        <div style={{ fontSize:12, color:"#EF4444", marginTop:5 }}>Report isolated. Will not enter Clinical Layer.</div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* VIRAL */}
+                  <div style={{ background:"#fff", borderRadius:22, padding:24, border:`2px solid ${r.viralFired ? "#C4B5FD" : "#E2E8F0"}`, boxShadow: r.viralFired ? "0 8px 44px #8B5CF622" : "0 2px 18px rgba(0,0,0,0.05)", transition:"all 0.35s" }}>
+                    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                        <div style={{ width:48, height:48, borderRadius:16, background: r.viralFired ? "linear-gradient(135deg,#8B5CF6,#7C3AED)" : "#F5F3FF", display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, boxShadow: r.viralFired ? "0 6px 20px #8B5CF650" : "none", transition:"all 0.3s" }}>🔬</div>
+                        <div>
+                          <div style={{ fontWeight:900, fontSize:16, color: r.viralFired ? "#8B5CF6" : "#1E293B" }}>Viral Screen</div>
+                          <div style={{ fontSize:12, color:"#94A3B8", marginTop:2 }}>Platelets · Lymphocytes · LDH</div>
+                        </div>
+                      </div>
+                      <div style={{ padding:"6px 14px", borderRadius:99, fontSize:13, fontWeight:800, background: r.viralFired ? "#8B5CF6" : "#F1F5F9", color: r.viralFired ? "#fff" : "#64748B", boxShadow: r.viralFired ? "0 4px 14px #8B5CF645" : "none", transition:"all 0.3s" }}>{r.vScore}/3 fired</div>
+                    </div>
+                    <div style={{ background:"#F5F3FF", borderRadius:14, padding:"12px 16px", marginBottom:10, border:"1px solid #EDE9FE" }}>
+                      <div style={{ fontSize:11, color:"#94A3B8", marginBottom:5, fontWeight:700, textTransform:"uppercase", letterSpacing:0.8 }}>Rule</div>
+                      <div style={{ fontSize:13, color:"#1E293B", fontFamily:"'JetBrains Mono',monospace", lineHeight:2 }}>
+                        <span style={{ color:"#8B5CF6", fontWeight:700 }}>PLT &lt; 100</span>
+                        <span style={{ color:"#94A3B8", fontWeight:700 }}> AND </span>
+                        <span style={{ color:"#8B5CF6", fontWeight:700 }}>LYMPH &lt; 15%</span>
+                        <span style={{ color:"#94A3B8", fontWeight:700 }}> AND </span>
+                        <span style={{ color:"#8B5CF6", fontWeight:700 }}>LDH &gt; 400</span>
+                        <br /><span style={{ color:"#6366F1", fontWeight:700 }}>→ fires ONLY when ALL 3 breach</span>
+                      </div>
+                    </div>
+                    <div style={{ background:"#FFFBEB", borderRadius:12, padding:"10px 14px", marginBottom:18, border:"1px solid #FDE68A" }}>
+                      <div style={{ fontSize:12, color:"#92400E", lineHeight:1.7, fontWeight:500 }}>
+                        <strong>⚠ Why ALL 3?</strong> PLT + Lymphocytes feed your Layer 3 SII formula (P×N/L). A partial drop = chronic drift signal — your most valuable data. LDH spike confirms it is truly acute viral, not drift.
+                      </div>
+                    </div>
+                    <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+                      {["PLT","LYMPH","LDH"].map((id) => (
+                        <MarkerCard key={id} id={id} value={vals[id]} onChange={setVal(id)} fired={id==="PLT"?r.vPLT:id==="LYMPH"?r.vLYMPH:r.vLDH} group="V" />
+                      ))}
+                    </div>
+                    {r.viralFired && (
+                      <div style={{ marginTop:16, padding:"14px 16px", background:"linear-gradient(135deg,#F5F3FF,#EDE9FE)", border:"2px solid #C4B5FD", borderRadius:14, boxShadow:"0 4px 20px #8B5CF620" }}>
+                        <div style={{ fontWeight:900, fontSize:14, color:"#7C3AED" }}>⛔ Viral Confirmed — Quarantine</div>
+                        <div style={{ fontSize:12, color:"#8B5CF6", marginTop:5 }}>All 3 markers breached. Report isolated.</div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* RIGHT */}
+                  <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+                    {/* Data flow */}
+                    <div style={{ background:"#fff", borderRadius:20, padding:20, border:"1px solid #E2E8F0", boxShadow:"0 2px 14px rgba(0,0,0,0.04)" }}>
+                      <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:16 }}>Data Flow</div>
+                      {[
+                        { label:"📥 INGESTION",  sub:"Batch normalised",       done:true,  blocked:false, active:false, color:"#059669" },
+                        { label:"🛡️ AMS SCREEN", sub:"Active — you are here",  done:false, blocked:false, active:true,  color:statusConfig.color },
+                        { label: r.quarantine ? "⛔ QUARANTINE" : "🏥 CLINICAL LAYER",
+                          sub:   r.quarantine ? "Report isolated" : "8-layer cascade", done:false, blocked:r.quarantine, active:false, color: r.quarantine ? "#EF4444" : "#6366F1" },
+                        { label:"📊 POPULATION", sub:"Aggregated intel",       done:false, blocked:r.quarantine, active:false, color:"#94A3B8" },
+                      ].map((step, i) => (
+                        <div key={i}>
+                          <div style={{ padding:"12px 16px", borderRadius:14, transition:"all 0.35s", background: step.active ? `linear-gradient(135deg,${step.color}18,${step.color}28)` : step.done ? "#F0FDF4" : step.blocked ? "#FEF2F2" : "#F8FAFC", border:`2px solid ${step.active ? step.color+"60" : step.done ? "#BBF7D0" : step.blocked ? "#FECACA" : "#E2E8F0"}`, boxShadow: step.active ? `0 4px 18px ${step.color}28` : "none" }}>
+                            <div style={{ fontWeight:800, fontSize:12, color: step.active ? step.color : step.done ? "#16A34A" : step.blocked ? "#DC2626" : "#94A3B8" }}>{step.label}</div>
+                            <div style={{ fontSize:11, color: step.blocked ? "#FCA5A5" : "#94A3B8", marginTop:3 }}>{step.sub}</div>
+                          </div>
+                          {i < 3 && <div style={{ display:"flex", justifyContent:"center", height:16 }}><div style={{ width:2, height:"100%", background: i===0 ? "#BBF7D0" : r.quarantine && i>=1 ? "#FECACA" : "#E2E8F0", transition:"background 0.3s", borderRadius:99 }} /></div>}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Drift */}
+                    <div style={{ background: r.drift.length>0&&!r.quarantine ? "linear-gradient(135deg,#FFFBEB,#FEF9C3)" : "#fff", border:`2px solid ${r.drift.length>0&&!r.quarantine ? "#FDE68A" : "#E2E8F0"}`, borderRadius:18, padding:18, transition:"all 0.35s", boxShadow: r.drift.length>0&&!r.quarantine ? "0 4px 22px #F59E0B22" : "0 2px 10px rgba(0,0,0,0.04)" }}>
+                      <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:12 }}>Sub-Clinical Drift</div>
+                      {r.drift.length>0 && !r.quarantine ? (
+                        <>
+                          <div style={{ fontWeight:900, fontSize:15, color:"#D97706", marginBottom:10 }}>⚡ {r.drift.length} velocity signal{r.drift.length>1?"s":""}</div>
+                          {r.drift.map((f,i) => <div key={i} style={{ fontSize:12, color:"#92400E", padding:"5px 0", borderBottom:"1px solid #FDE68A", display:"flex", alignItems:"center", gap:8, fontWeight:600 }}><span style={{ color:"#F59E0B" }}>→</span>{f}</div>)}
+                          <div style={{ marginTop:12, fontSize:12, color:"#B45309", lineHeight:1.7, fontWeight:500 }}>These are velocity vectors. They PASS to Clinical Layer and feed the Singapore model.</div>
+                        </>
+                      ) : r.quarantine
+                        ? <div style={{ fontSize:12, color:"#94A3B8" }}>Report quarantined — drift analysis not applicable.</div>
+                        : <div style={{ fontSize:12, color:"#94A3B8" }}>No drift signals. Clean pass.</div>
+                      }
+                    </div>
+
+                    {/* Rules */}
+                    <div style={{ background:"#fff", border:"1px solid #E2E8F0", borderRadius:18, padding:18, boxShadow:"0 2px 10px rgba(0,0,0,0.04)" }}>
+                      <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:14 }}>Decision Rules</div>
+                      {[
+                        ["🔴 Bacterial",  "≥ 2 of WBC · NEUT · CRP",   "#EF4444"],
+                        ["🟣 Viral",      "ALL 3 of PLT · LYMPH · LDH", "#8B5CF6"],
+                        ["🟠 Mixed",      "Both patterns fire",          "#F97316"],
+                        ["🟡 Drift",      "Elevated, below threshold",   "#D97706"],
+                        ["🟢 Clean Pass", "Nothing fires",               "#059669"],
+                      ].map(([lbl,rule,c],i) => (
+                        <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"7px 0", borderBottom: i<4 ? "1px solid #F1F5F9" : "none" }}>
+                          <span style={{ fontSize:13, fontWeight:700, color:c }}>{lbl}</span>
+                          <span style={{ fontSize:11, color:"#94A3B8", textAlign:"right", maxWidth:140 }}>{rule}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ══ LOGIC TAB ══ */}
+              {tab === "logic" && (
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 320px", gap:18 }}>
+                  <div style={{ background:"#fff", borderRadius:22, padding:32, border:"1px solid #E2E8F0", boxShadow:"0 2px 20px rgba(0,0,0,0.05)", overflowX:"auto" }}>
+                    <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:28 }}>Decision Tree — Live State</div>
+                    <div style={{ display:"flex", flexDirection:"column", alignItems:"center", minWidth:500 }}>
+                      <div style={{ padding:"14px 36px", borderRadius:16, background:"linear-gradient(135deg,#EEF2FF,#E0E7FF)", border:"2px solid #A5B4FC", boxShadow:"0 4px 22px #6366F125", minWidth:220, textAlign:"center" }}>
+                        <div style={{ fontWeight:900, fontSize:15, color:"#4F46E5" }}>📥 REPORT RECEIVED</div>
+                        <div style={{ fontSize:12, color:"#818CF8", marginTop:3 }}>from ingestion layer</div>
+                      </div>
+                      <div style={{ width:2, height:28, background:"#A5B4FC" }} />
+                      <div style={{ padding:"14px 30px", borderRadius:16, background: r.bacterialFired ? "linear-gradient(135deg,#FEF2F2,#FEE2E2)" : "#FFF5F5", border:`2px solid ${r.bacterialFired ? "#F87171" : "#FCA5A5"}`, boxShadow: r.bacterialFired ? "0 4px 22px #EF444428" : "none", minWidth:240, textAlign:"center", transition:"all 0.35s" }}>
+                        <div style={{ fontWeight:900, fontSize:15, color: r.bacterialFired ? "#DC2626" : "#EF4444" }}>🦠 BACTERIAL CHECK</div>
+                        <div style={{ fontSize:12, color:"#94A3B8", marginTop:4 }}>WBC &gt; 15 · NEUT &gt; 80% · CRP &gt; 50</div>
+                        <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:13, fontWeight:700, color: r.bacterialFired ? "#DC2626" : "#94A3B8", marginTop:5 }}>{r.bScore}/3 scored</div>
+                      </div>
+                      <div style={{ display:"flex", width:"100%", justifyContent:"center", gap:100, alignItems:"flex-start" }}>
+                        <div style={{ display:"flex", flexDirection:"column", alignItems:"center" }}>
+                          <div style={{ width:2, height:28, background: r.bacterialFired ? "#F87171" : "#E2E8F0", transition:"background 0.3s" }} />
+                          <div style={{ fontSize:11, fontWeight:700, color: r.bacterialFired ? "#EF4444" : "#CBD5E1", marginBottom:7, fontFamily:"'JetBrains Mono',monospace" }}>≥ 2 fires</div>
+                          <div style={{ padding:"14px 22px", borderRadius:16, background: r.bacterialFired ? "linear-gradient(135deg,#EF4444,#DC2626)" : "#F8FAFC", border:`2px solid ${r.bacterialFired ? "#EF4444" : "#E2E8F0"}`, textAlign:"center", transition:"all 0.35s", boxShadow: r.bacterialFired ? "0 8px 28px #EF444445" : "none", minWidth:150 }}>
+                            <div style={{ fontWeight:900, fontSize:15, color: r.bacterialFired ? "#fff" : "#CBD5E1" }}>⛔ QUARANTINE</div>
+                            <div style={{ fontSize:12, color: r.bacterialFired ? "rgba(255,255,255,0.8)" : "#E2E8F0", marginTop:3 }}>BACTERIAL</div>
+                          </div>
+                        </div>
+                        <div style={{ display:"flex", flexDirection:"column", alignItems:"center" }}>
+                          <div style={{ width:2, height:28, background: !r.bacterialFired ? "#A5B4FC" : "#E2E8F0", transition:"background 0.3s" }} />
+                          <div style={{ fontSize:11, fontWeight:700, color: !r.bacterialFired ? "#6366F1" : "#CBD5E1", marginBottom:7, fontFamily:"'JetBrains Mono',monospace" }}>&lt; 2 fires</div>
+                          <div style={{ padding:"14px 28px", borderRadius:16, background: !r.bacterialFired ? "linear-gradient(135deg,#F5F3FF,#EDE9FE)" : "#F8FAFC", border:`2px solid ${!r.bacterialFired ? "#C4B5FD" : "#E2E8F0"}`, minWidth:240, textAlign:"center", transition:"all 0.35s", boxShadow: !r.bacterialFired ? "0 4px 22px #8B5CF622" : "none" }}>
+                            <div style={{ fontWeight:900, fontSize:15, color: !r.bacterialFired ? "#7C3AED" : "#CBD5E1" }}>🔬 VIRAL CHECK</div>
+                            <div style={{ fontSize:12, color:"#94A3B8", marginTop:4 }}>PLT &lt; 100 · LYMPH &lt; 15% · LDH &gt; 400</div>
+                            <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:13, fontWeight:700, color: !r.bacterialFired ? "#7C3AED" : "#E2E8F0", marginTop:5 }}>{r.vScore}/3 scored</div>
+                          </div>
+                          <div style={{ display:"flex", gap:60, alignItems:"flex-start" }}>
+                            <div style={{ display:"flex", flexDirection:"column", alignItems:"center" }}>
+                              <div style={{ width:2, height:28, background: r.viralFired ? "#C4B5FD" : "#E2E8F0", transition:"background 0.3s" }} />
+                              <div style={{ fontSize:11, fontWeight:700, color: r.viralFired ? "#8B5CF6" : "#CBD5E1", marginBottom:7, fontFamily:"'JetBrains Mono',monospace" }}>all 3 fire</div>
+                              <div style={{ padding:"14px 22px", borderRadius:16, background: r.viralFired ? "linear-gradient(135deg,#8B5CF6,#7C3AED)" : "#F8FAFC", border:`2px solid ${r.viralFired ? "#8B5CF6" : "#E2E8F0"}`, textAlign:"center", transition:"all 0.35s", boxShadow: r.viralFired ? "0 8px 28px #8B5CF645" : "none", minWidth:150 }}>
+                                <div style={{ fontWeight:900, fontSize:15, color: r.viralFired ? "#fff" : "#CBD5E1" }}>⛔ QUARANTINE</div>
+                                <div style={{ fontSize:12, color: r.viralFired ? "rgba(255,255,255,0.8)" : "#E2E8F0", marginTop:3 }}>VIRAL</div>
+                              </div>
+                            </div>
+                            <div style={{ display:"flex", flexDirection:"column", alignItems:"center" }}>
+                              <div style={{ width:2, height:28, background: !r.quarantine ? "#6EE7B7" : "#E2E8F0", transition:"background 0.3s" }} />
+                              <div style={{ fontSize:11, fontWeight:700, color: !r.quarantine ? "#059669" : "#CBD5E1", marginBottom:7, fontFamily:"'JetBrains Mono',monospace" }}>&lt; 3 fires</div>
+                              <div style={{ padding:"11px 18px", borderRadius:14, background:"#FFFBEB", border:"2px solid #FDE68A", textAlign:"center", minWidth:140 }}>
+                                <div style={{ fontWeight:800, fontSize:13, color:"#D97706" }}>⚡ DRIFT SCAN</div>
+                                <div style={{ fontSize:11, color:"#92400E", marginTop:3 }}>{r.drift.length} signals found</div>
+                              </div>
+                              <div style={{ width:2, height:22, background: !r.quarantine ? "#6EE7B7" : "#E2E8F0", transition:"background 0.3s" }} />
+                              <div style={{ padding:"16px 22px", borderRadius:16, background: !r.quarantine ? `linear-gradient(135deg,${statusConfig.color}18,${statusConfig.color}32)` : "#F8FAFC", border:`2px solid ${!r.quarantine ? statusConfig.color+"55" : "#E2E8F0"}`, textAlign:"center", transition:"all 0.35s", boxShadow: !r.quarantine ? `0 8px 28px ${statusConfig.color}28` : "none", minWidth:155 }}>
+                                <div style={{ fontWeight:900, fontSize:15, color: !r.quarantine ? statusConfig.color : "#CBD5E1" }}>
+                                  {r.drift.length > 0 ? "✅ PASS + FLAG" : "✅ CLEAN PASS"}
+                                </div>
+                                <div style={{ fontSize:12, color: !r.quarantine ? statusConfig.color+"99" : "#E2E8F0", marginTop:3 }}>→ Clinical Layer</div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Step trace */}
+                  <div style={{ background:"#fff", border:"1px solid #E2E8F0", borderRadius:22, padding:22, boxShadow:"0 2px 14px rgba(0,0,0,0.04)" }}>
+                    <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:16 }}>Step-by-Step Trace</div>
                     {[
-                      ["WBC",  vals.WBC,   "> 15",  r.bWBC,  "#EF4444"],
-                      ["NEUT", vals.NEUT,  "> 80%", r.bNEUT, "#EF4444"],
-                      ["CRP",  vals.CRP,   "> 50",  r.bCRP,  "#EF4444"],
-                      ["PLT",  vals.PLT,   "< 100", r.vPLT,  "#8B5CF6"],
-                      ["LYMPH",vals.LYMPH, "< 15%", r.vLYMPH,"#8B5CF6"],
-                      ["LDH",  vals.LDH,   "> 400", r.vLDH,  "#8B5CF6"],
-                    ].map(([id, val, thr, fired, col], i) => (
-                      <div key={i} style={{ display:"grid", gridTemplateColumns:"90px 90px 110px 100px", padding:"10px 16px", borderBottom: i < 5 ? "1px solid #F1F5F9" : "none", background: fired ? `${col}08` : "transparent", transition:"background 0.3s" }}>
-                        <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:13, fontWeight:800, color: fired ? col : "#1E293B" }}>{id}</span>
-                        <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:13, fontWeight:900, color: fired ? col : "#0F172A" }}>{(val).toFixed(1)}</span>
-                        <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:12, color:"#94A3B8" }}>{thr}</span>
-                        <span style={{ fontSize:12, fontWeight:800, color: fired ? col : "#059669" }}>{fired ? "⚡ BREACH" : "✓ clear"}</span>
+                      { n:1,  txt:"Report arrives from ingestion",                                       col:"#6366F1", bg:"#EEF2FF" },
+                      { n:2,  txt:`WBC: ${vals.WBC.toFixed(1)} → ${r.bWBC  ? "⚡ BREACH" : "✓ ok"}`,   col:r.bWBC  ?"#EF4444":"#94A3B8", bg:r.bWBC  ?"#FEF2F2":"#F8FAFC" },
+                      { n:3,  txt:`NEUT: ${vals.NEUT.toFixed(1)}% → ${r.bNEUT ? "⚡ BREACH" : "✓ ok"}`, col:r.bNEUT ?"#EF4444":"#94A3B8", bg:r.bNEUT ?"#FEF2F2":"#F8FAFC" },
+                      { n:4,  txt:`CRP: ${vals.CRP.toFixed(1)} → ${r.bCRP  ? "⚡ BREACH" : "✓ ok"}`,   col:r.bCRP  ?"#EF4444":"#94A3B8", bg:r.bCRP  ?"#FEF2F2":"#F8FAFC" },
+                      { n:5,  txt:`Bacterial ${r.bScore}/3 → ${r.bacterialFired ? "QUARANTINE" : "continue"}`, col:r.bacterialFired?"#DC2626":"#059669", bg:r.bacterialFired?"#FEE2E2":"#F0FDF4", bold:true },
+                      ...(!r.bacterialFired ? [
+                        { n:6,  txt:`PLT: ${vals.PLT.toFixed(1)} → ${r.vPLT   ? "⚡ BREACH" : "✓ ok"}`,     col:r.vPLT  ?"#8B5CF6":"#94A3B8", bg:r.vPLT  ?"#F5F3FF":"#F8FAFC" },
+                        { n:7,  txt:`LYMPH: ${vals.LYMPH.toFixed(1)}% → ${r.vLYMPH ? "⚡ BREACH" : "✓ ok"}`, col:r.vLYMPH?"#8B5CF6":"#94A3B8", bg:r.vLYMPH?"#F5F3FF":"#F8FAFC" },
+                        { n:8,  txt:`LDH: ${vals.LDH.toFixed(1)} → ${r.vLDH   ? "⚡ BREACH" : "✓ ok"}`,     col:r.vLDH  ?"#8B5CF6":"#94A3B8", bg:r.vLDH  ?"#F5F3FF":"#F8FAFC" },
+                        { n:9,  txt:`Viral ${r.vScore}/3 → ${r.viralFired ? "QUARANTINE" : "continue"}`,      col:r.viralFired?"#7C3AED":"#059669", bg:r.viralFired?"#EDE9FE":"#F0FDF4", bold:true },
+                        ...(!r.quarantine ? [
+                          { n:10, txt:`Drift: ${r.drift.length} signal${r.drift.length!==1?"s":""}`,           col:r.drift.length>0?"#D97706":"#059669", bg:r.drift.length>0?"#FFFBEB":"#F0FDF4" },
+                          { n:11, txt:`→ PASS TO CLINICAL${r.drift.length>0?" (drift flagged)":""}`,          col:statusConfig.color, bg:"#F0FDF4", bold:true },
+                        ] : [])
+                      ] : [])
+                    ].map((row) => (
+                      <div key={row.n} style={{ display:"flex", gap:10, alignItems:"center", padding:"8px 12px", borderRadius:10, background:row.bg, marginBottom:5, transition:"background 0.3s" }}>
+                        <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:11, color:"#CBD5E1", minWidth:22, fontWeight:700 }}>{row.n}.</span>
+                        <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:12, color:row.col, fontWeight: row.bold ? 900 : 500 }}>{row.txt}</span>
                       </div>
                     ))}
                   </div>
                 </div>
+              )}
 
-                {/* Rayyan notes */}
-                <div style={{ background:"linear-gradient(135deg,#FFFBEB,#FEF3C7)", border:"2px solid #FDE68A", borderRadius:18, padding:20, boxShadow:"0 4px 22px #F59E0B18" }}>
-                  <div style={{ fontWeight:900, fontSize:15, color:"#D97706", marginBottom:16 }}>⚡ Rayyan — Key Rules for CF2</div>
-                  {[
-                    ["Order matters",         "Bacterial check runs first. If it fires, skip viral — no double processing."],
-                    ["Viral = strict AND",     "Requires all 3 to fire. Two fires is drift, not viral. Never quarantine on 2."],
-                    ["PLT + LYMPH = SII",      "These feed Layer 3 SII formula (P×N/L). Never filter them alone. LDH is safe standalone."],
-                    ["Drift is not noise",     "1–2 elevated markers are velocity vectors for the Singapore model. Must reach Clinical Layer."],
-                    ["No PCT anywhere",        "Not in the Science Book. Do not code it in AMS, CF2, or anywhere in the pipeline."],
-                  ].map(([title, note], i) => (
-                    <div key={i} style={{ marginBottom:12, padding:"10px 14px", background:"rgba(255,255,255,0.65)", borderRadius:12 }}>
-                      <div style={{ fontWeight:800, fontSize:13, color:"#92400E" }}>→ {title}</div>
-                      <div style={{ fontSize:12, color:"#B45309", marginTop:4, lineHeight:1.6 }}>{note}</div>
+              {/* ══ CODE TAB ══ */}
+              {tab === "code" && (
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(420px,1fr))", gap:18 }}>
+                  <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+                    <div style={{ background:"#fff", borderRadius:18, padding:22, border:"1px solid #E2E8F0", boxShadow:"0 2px 14px rgba(0,0,0,0.04)" }}>
+                      <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:12 }}>Threshold Constants — paste into CF2</div>
+                      <CodeBlock lines={["// ── BACTERIAL ─────────────────────────","const WBC_FIRE_ABOVE    = 15.0  // ×10³/μL","const NEUT_FIRE_ABOVE   = 80.0  // %","const CRP_FIRE_ABOVE    = 50.0  // mg/L","const BACTERIAL_MIN     = 2     // of 3","","// ── VIRAL ──────────────────────────────","const PLT_FIRE_BELOW    = 100   // ×10³/μL","const LYMPH_FIRE_BELOW  = 15.0  // %","const LDH_FIRE_ABOVE    = 400   // U/L","const VIRAL_MIN         = 3     // ALL 3 required","","// ── DRIFT (pass-through, never quarantine)","const WBC_DRIFT         = 11.0","const CRP_DRIFT         = 10.0","const PLT_DRIFT         = 150","const LYMPH_DRIFT       = 20.0","const LDH_DRIFT         = 280"]} />
                     </div>
-                  ))}
+                    <div style={{ background:"#fff", borderRadius:18, padding:22, border:"1px solid #E2E8F0", boxShadow:"0 2px 14px rgba(0,0,0,0.04)" }}>
+                      <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:12 }}>AMS Main Function</div>
+                      <CodeBlock lines={["function runAMS(report) {","","  // STEP 1 — Bacterial (2-of-3)","  const bWBC  = report.WBC  > WBC_FIRE_ABOVE","  const bNEUT = report.NEUT > NEUT_FIRE_ABOVE","  const bCRP  = report.CRP  > CRP_FIRE_ABOVE","  const bScore = count(bWBC, bNEUT, bCRP)","","  if (bScore >= BACTERIAL_MIN)","    return { status: QUARANTINE, type: 'BACTERIAL' }","","  // STEP 2 — Viral (ALL 3 required)","  const vPLT   = report.PLT   < PLT_FIRE_BELOW","  const vLYMPH = report.LYMPH < LYMPH_FIRE_BELOW","  const vLDH   = report.LDH   > LDH_FIRE_ABOVE","  const vScore = count(vPLT, vLYMPH, vLDH)","","  if (vScore === VIRAL_MIN)","    return { status: QUARANTINE, type: 'VIRAL' }","","  // STEP 3 — Drift scan (always PASS)","  const drift = detectDrift(report)","  return { status: PASS, drift }","}"]} />
+                    </div>
+                  </div>
+                  <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+                    <div style={{ background:"#fff", borderRadius:18, padding:22, border:"1px solid #E2E8F0", boxShadow:"0 2px 14px rgba(0,0,0,0.04)" }}>
+                      <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:12 }}>Drift Detection</div>
+                      <CodeBlock lines={["function detectDrift(report) {","  const flags = []","","  if (report.WBC   > WBC_DRIFT)   flags.push('WBC elevated')","  if (report.CRP   > CRP_DRIFT)   flags.push('CRP elevated')","  if (report.PLT   < PLT_DRIFT)   flags.push('PLT suppressed')","  if (report.LYMPH < LYMPH_DRIFT) flags.push('Lymphocytes low')","  if (report.LDH   > LDH_DRIFT)   flags.push('LDH elevated')","","  // Attach to report — Clinical Layer uses these","  return flags","}"]} />
+                    </div>
+                    <div style={{ background:"#fff", borderRadius:18, padding:22, border:"1px solid #E2E8F0", boxShadow:"0 2px 14px rgba(0,0,0,0.04)" }}>
+                      <div style={{ fontWeight:800, fontSize:12, color:"#94A3B8", letterSpacing:1.5, textTransform:"uppercase", marginBottom:14 }}>Live Values vs Thresholds</div>
+                      <div style={{ borderRadius:14, overflow:"hidden", border:"1px solid #E2E8F0" }}>
+                        <div style={{ display:"grid", gridTemplateColumns:"90px 90px 110px 100px", background:"#F8FAFC", padding:"10px 16px", borderBottom:"1px solid #E2E8F0" }}>
+                          {["Marker","Value","Threshold","Status"].map((h) => <span key={h} style={{ fontWeight:800, fontSize:11, color:"#94A3B8", textTransform:"uppercase", letterSpacing:0.5 }}>{h}</span>)}
+                        </div>
+                        {[["WBC",vals.WBC,"> 15",r.bWBC,"#EF4444"],["NEUT",vals.NEUT,"> 80%",r.bNEUT,"#EF4444"],["CRP",vals.CRP,"> 50",r.bCRP,"#EF4444"],["PLT",vals.PLT,"< 100",r.vPLT,"#8B5CF6"],["LYMPH",vals.LYMPH,"< 15%",r.vLYMPH,"#8B5CF6"],["LDH",vals.LDH,"> 400",r.vLDH,"#8B5CF6"]].map(([id,val,thr,fired,col],i) => (
+                          <div key={i} style={{ display:"grid", gridTemplateColumns:"90px 90px 110px 100px", padding:"10px 16px", borderBottom: i<5 ? "1px solid #F1F5F9" : "none", background: fired ? `${col}08` : "transparent", transition:"background 0.3s" }}>
+                            <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:13, fontWeight:800, color: fired ? col : "#1E293B" }}>{id}</span>
+                            <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:13, fontWeight:900, color: fired ? col : "#0F172A" }}>{val.toFixed(1)}</span>
+                            <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:12, color:"#94A3B8" }}>{thr}</span>
+                            <span style={{ fontSize:12, fontWeight:800, color: fired ? col : "#059669" }}>{fired ? "⚡ BREACH" : "✓ clear"}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div style={{ background:"linear-gradient(135deg,#FFFBEB,#FEF3C7)", border:"2px solid #FDE68A", borderRadius:18, padding:20, boxShadow:"0 4px 22px #F59E0B18" }}>
+                      <div style={{ fontWeight:900, fontSize:15, color:"#D97706", marginBottom:16 }}>⚡ Rayyan — Key Rules for CF2</div>
+                      {[
+                        ["Order matters",      "Bacterial check runs first. If it fires, skip viral — no double processing."],
+                        ["Viral = strict AND", "Requires all 3 to fire. Two fires is drift, not viral. Never quarantine on 2."],
+                        ["PLT + LYMPH = SII",  "These feed Layer 3 SII formula (P×N/L). Never filter them alone. LDH is safe standalone."],
+                        ["Drift is not noise", "1–2 elevated markers are velocity vectors for the Singapore model. Must reach Clinical Layer."],
+                        ["No PCT anywhere",    "Not in the Science Book. Do not code it in AMS, CF2, or anywhere in the pipeline."],
+                      ].map(([title,note],i) => (
+                        <div key={i} style={{ marginBottom:12, padding:"10px 14px", background:"rgba(255,255,255,0.65)", borderRadius:12 }}>
+                          <div style={{ fontWeight:800, fontSize:13, color:"#92400E" }}>→ {title}</div>
+                          <div style={{ fontSize:12, color:"#B45309", marginTop:4, lineHeight:1.6 }}>{note}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-              </div>
+              )}
+
             </div>
-          )}
+          </div>
         </div>
-      </div>
-    </div>
-  );
-}
+      );
+    }
+
+    // Mount
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<AMS />);
+  </script>
+</body>
+</html>
